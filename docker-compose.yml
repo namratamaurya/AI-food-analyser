@@ -1,0 +1,29 @@
+version: '3.8'
+
+services:
+  mongo:
+    image: mongo:7
+    container_name: nutrition-mongo
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo-data:/data/db
+
+  api:
+    build: .
+    container_name: nutrition-api
+    command: ["/bin/sh", "-c", "./scripts/wait-for.sh mongo 27017 uvicorn app.api:app --host 0.0.0.0 --port 8000 --reload"]
+    volumes:
+      - ./:/app
+    ports:
+      - "8000:8000"
+    environment:
+      - MONGODB_URI=mongodb://mongo:27017
+      - MONGODB_DB=nutrition_app
+      - OPENAI_API_KEY=
+    depends_on:
+      - mongo
+
+volumes:
+  mongo-data:

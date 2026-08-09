@@ -1,0 +1,1 @@
+"""Nutrition Analyzer application package."""
