@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 
 from pymongo import MongoClient
 from pymongo.errors import PyMongoError
+from bson import ObjectId
 
 from app.config import Settings
 from app.models import DailyGoals, MacroBreakdown
@@ -37,13 +38,14 @@ class InMemoryStorage(StorageRepository):
         return goals
 
     def add_meal(self, meal: dict) -> dict:
-        self.meal_history.append(meal)
+        document = {**meal, "created_at": datetime.now(timezone.utc).isoformat()}
+        self.meal_history.append(document)
         self.consumed.calories += meal["macros"]["calories"]
         self.consumed.protein_g += meal["macros"]["protein_g"]
         self.consumed.carbs_g += meal["macros"]["carbs_g"]
         self.consumed.fat_g += meal["macros"]["fat_g"]
         self.consumed.fiber_g += meal["macros"]["fiber_g"]
-        return meal
+        return document
 
     def get_daily_summary(self) -> dict:
         remaining = MacroBreakdown(
@@ -101,8 +103,8 @@ class MongoStorage(StorageRepository):
     def add_meal(self, meal: dict) -> dict:
         if self._ensure_connection():
             document = {**meal, "created_at": datetime.now(timezone.utc).isoformat()}
-            self._meals_collection.insert_one(document)
-            return document
+            result = self._meals_collection.insert_one(document)
+            return self._serialize_document({**document, "_id": result.inserted_id})
         return self._fallback.add_meal(meal)
 
     def get_daily_summary(self) -> dict:
@@ -130,8 +132,17 @@ class MongoStorage(StorageRepository):
 
     def get_meal_history(self) -> list[dict]:
         if self._ensure_connection():
-            return list(self._meals_collection.find().sort("created_at", -1))
+            return [self._serialize_document(meal) for meal in self._meals_collection.find().sort("created_at", -1)]
         return self._fallback.get_meal_history()
+
+    def _serialize_document(self, document: dict) -> dict:
+        serialized = {}
+        for key, value in document.items():
+            if isinstance(value, ObjectId):
+                serialized[key] = str(value)
+            else:
+                serialized[key] = value
+        return serialized
 
 
 def create_storage(settings: Settings) -> StorageRepository:

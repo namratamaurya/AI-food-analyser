@@ -17,10 +17,10 @@ class AIService:
 
     def analyze_image(self, image_bytes: bytes | None, notes: str | None = None) -> dict[str, Any]:
         if not image_bytes:
-            return self._fallback_result(notes or "No image provided")
+            return self._fallback_result("No image bytes were received by the backend.", notes)
 
         if not self.client:
-            return self._fallback_result(notes or "AI unavailable")
+            return self._fallback_result("OPENAI_API_KEY is not configured.", notes)
 
         try:
             encoded = base64.b64encode(image_bytes).decode("utf-8")
@@ -59,8 +59,12 @@ class AIService:
             raw_text = response.choices[0].message.content or "{}"
             payload = json.loads(raw_text)
             return self._normalize(payload, notes)
-        except (OpenAIError, json.JSONDecodeError, KeyError, TypeError):
-            return self._fallback_result(notes or "AI parsing failed")
+        except OpenAIError as exc:
+            return self._fallback_result(f"OpenAI request failed: {exc.__class__.__name__}.", notes)
+        except json.JSONDecodeError:
+            return self._fallback_result("OpenAI returned a response that was not valid JSON.", notes)
+        except (KeyError, TypeError, ValueError) as exc:
+            return self._fallback_result(f"AI response could not be normalized: {exc.__class__.__name__}.", notes)
 
     def analyze_image_url(self, image_url: str | None, notes: str | None = None) -> dict[str, Any]:
         image_bytes = self._load_image_bytes(image_url)
@@ -92,7 +96,7 @@ class AIService:
         except httpx.HTTPError:
             return None
 
-    def _fallback_result(self, notes: str) -> dict[str, Any]:
+    def _fallback_result(self, reason: str, notes: str | None = None) -> dict[str, Any]:
         ingredient_macros = {
             "calories": 520.0,
             "protein_g": 22.0,
@@ -100,11 +104,14 @@ class AIService:
             "fat_g": 19.0,
             "fiber_g": 8.0,
         }
+        note_text = f" Notes: {notes}" if notes else ""
         return {
             "meal_name": "Detected meal",
             "confidence": 0.72,
-            "summary": f"A fallback nutrition estimate was produced for: {notes}",
+            "summary": f"AI image analysis did not complete, so this is a placeholder estimate. Reason: {reason}{note_text}",
             "detected_tags": ["fallback", "image-analysis"],
+            "is_fallback": True,
+            "fallback_reason": reason,
             "ingredients": [
                 {
                     "name": "Mixed meal",
@@ -142,6 +149,8 @@ class AIService:
             "confidence": float(payload.get("confidence", 0.7)),
             "summary": payload.get("summary", f"Nutrition estimate for {notes or 'meal'}"),
             "detected_tags": payload.get("detected_tags", []),
+            "is_fallback": False,
+            "fallback_reason": None,
             "ingredients": normalized_ingredients or [
                 {
                     "name": "Unknown ingredient",

@@ -39,6 +39,53 @@ def health_check() -> dict[str, str]:
     return {"status": "ok", "ai_configured": "true" if settings.openai_api_key else "false"}
 
 
+def _daily_summary_response() -> DailySummary:
+    summary = storage.get_daily_summary()
+    return DailySummary(
+        goals=summary["goals"],
+        consumed=summary["consumed"],
+        remaining=summary["remaining"],
+    )
+
+
+def _build_analysis_response(analysis: dict) -> MealAnalysisResponse:
+    return MealAnalysisResponse(
+        meal_name=analysis["meal_name"],
+        confidence=analysis["confidence"],
+        macros=MacroBreakdown(**analysis["macros"]),
+        summary=analysis["summary"],
+        ingredients=[
+            {
+                "name": ingredient["name"],
+                "estimated_quantity_g": ingredient.get("estimated_quantity_g"),
+                "confidence": ingredient.get("confidence", 0.0),
+                "macros": ingredient["macros"],
+            }
+            for ingredient in analysis.get("ingredients", [])
+        ],
+        detected_tags=analysis.get("detected_tags", []),
+        is_fallback=analysis.get("is_fallback", False),
+        fallback_reason=analysis.get("fallback_reason"),
+    )
+
+
+def _store_real_analysis(response: MealAnalysisResponse, user_id: str | None = None) -> None:
+    if response.is_fallback:
+        return
+
+    storage.add_meal(
+        {
+            "meal_name": response.meal_name,
+            "confidence": response.confidence,
+            "macros": response.macros.model_dump(),
+            "summary": response.summary,
+            "ingredients": [ingredient.model_dump() for ingredient in response.ingredients],
+            "detected_tags": response.detected_tags,
+            "user_id": user_id,
+        }
+    )
+
+
 @app.post("/analyze-meal", response_model=MealAnalysisResponse)
 async def analyze_meal(payload: MealAnalysisRequest) -> MealAnalysisResponse:
     analysis = {
@@ -59,31 +106,9 @@ async def analyze_meal(payload: MealAnalysisRequest) -> MealAnalysisResponse:
     if payload.image_url:
         analysis = ai_service.analyze_image_url(payload.image_url, payload.notes)
 
-    response = MealAnalysisResponse(
-        meal_name=analysis["meal_name"],
-        confidence=analysis["confidence"],
-        macros=MacroBreakdown(**analysis["macros"]),
-        summary=analysis["summary"],
-        ingredients=[
-            {
-                "name": ingredient["name"],
-                "estimated_quantity_g": ingredient.get("estimated_quantity_g"),
-                "confidence": ingredient.get("confidence", 0.0),
-                "macros": ingredient["macros"],
-            }
-            for ingredient in analysis.get("ingredients", [])
-        ],
-        detected_tags=analysis.get("detected_tags", []),
-    )
-
-    storage.add_meal(
-        {
-            "meal_name": response.meal_name,
-            "macros": response.macros.model_dump(),
-            "summary": response.summary,
-            "user_id": payload.user_id,
-        }
-    )
+    response = _build_analysis_response(analysis)
+    _store_real_analysis(response, payload.user_id)
+    response.cumulative_summary = _daily_summary_response()
     return response
 
 
@@ -91,23 +116,9 @@ async def analyze_meal(payload: MealAnalysisRequest) -> MealAnalysisResponse:
 async def upload_image(file: UploadFile = File(...), notes: str | None = None) -> MealAnalysisResponse:
     image_bytes = await file.read()
     analysis = ai_service.analyze_image(image_bytes, notes)
-    response = MealAnalysisResponse(
-        meal_name=analysis["meal_name"],
-        confidence=analysis["confidence"],
-        macros=MacroBreakdown(**analysis["macros"]),
-        summary=analysis["summary"],
-        ingredients=[
-            {
-                "name": ingredient["name"],
-                "estimated_quantity_g": ingredient.get("estimated_quantity_g"),
-                "confidence": ingredient.get("confidence", 0.0),
-                "macros": ingredient["macros"],
-            }
-            for ingredient in analysis.get("ingredients", [])
-        ],
-        detected_tags=analysis.get("detected_tags", []),
-    )
-    storage.add_meal({"meal_name": response.meal_name, "macros": response.macros.model_dump(), "summary": response.summary})
+    response = _build_analysis_response(analysis)
+    _store_real_analysis(response)
+    response.cumulative_summary = _daily_summary_response()
     return response
 
 
@@ -161,12 +172,7 @@ def set_goals(payload: DailyGoals) -> DailyGoals:
 
 @app.get("/daily-summary", response_model=DailySummary)
 def daily_summary() -> DailySummary:
-    summary = storage.get_daily_summary()
-    return DailySummary(
-        goals=summary["goals"],
-        consumed=summary["consumed"],
-        remaining=summary["remaining"],
-    )
+    return _daily_summary_response()
 
 
 @app.get("/meal-history")

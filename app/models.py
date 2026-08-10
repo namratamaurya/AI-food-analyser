@@ -22,6 +22,20 @@ class IngredientAnalysis(BaseModel):
     macros: MacroBreakdown
 
 
+class DailyGoals(BaseModel):
+    calories: float = 2000.0
+    protein_g: float = 150.0
+    carbs_g: float = 220.0
+    fat_g: float = 70.0
+    fiber_g: float = 30.0
+
+
+class DailySummary(BaseModel):
+    goals: DailyGoals
+    consumed: MacroBreakdown
+    remaining: MacroBreakdown
+
+
 class MealAnalysisResponse(BaseModel):
     meal_name: str
     confidence: float
@@ -29,6 +43,9 @@ class MealAnalysisResponse(BaseModel):
     summary: str
     ingredients: list[IngredientAnalysis] = Field(default_factory=list)
     detected_tags: list[str] = Field(default_factory=list)
+    is_fallback: bool = False
+    fallback_reason: str | None = None
+    cumulative_summary: DailySummary | None = None
 
 
 class MacroAccuracyMetric(BaseModel):
@@ -49,16 +66,3 @@ class AccuracyCheckResponse(BaseModel):
     average_percent_error: float | None = None
     metrics: dict[str, MacroAccuracyMetric]
 
-
-class DailyGoals(BaseModel):
-    calories: float = 2000.0
-    protein_g: float = 150.0
-    carbs_g: float = 220.0
-    fat_g: float = 70.0
-    fiber_g: float = 30.0
-
-
-class DailySummary(BaseModel):
-    goals: DailyGoals
-    consumed: MacroBreakdown
-    remaining: MacroBreakdown

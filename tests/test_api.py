@@ -37,7 +37,7 @@ def test_cors_preflight_allows_frontend_origin() -> None:
 
 def test_analyze_meal_endpoint(monkeypatch) -> None:
     def fake_analyze_image_url(image_url: str, notes: str | None = None) -> dict:
-        return api_module.ai_service._fallback_result(notes or image_url)
+        return api_module.ai_service._fallback_result("Test fallback.", notes or image_url)
 
     monkeypatch.setattr(api_module.ai_service, "analyze_image_url", fake_analyze_image_url)
 
@@ -48,6 +48,9 @@ def test_analyze_meal_endpoint(monkeypatch) -> None:
     assert response.status_code == 200
     assert response.json()["meal_name"]
     assert response.json()["macros"]["calories"] >= 0
+    assert response.json()["is_fallback"] is True
+    assert response.json()["fallback_reason"] == "Test fallback."
+    assert response.json()["cumulative_summary"]
 
 
 def test_upload_image_endpoint_accepts_frontend_form_data() -> None:
@@ -59,6 +62,60 @@ def test_upload_image_endpoint_accepts_frontend_form_data() -> None:
     assert response.status_code == 200
     assert response.json()["meal_name"]
     assert response.json()["detected_tags"]
+    assert response.json()["is_fallback"] is True
+    assert response.json()["fallback_reason"] == "No image bytes were received by the backend."
+    assert response.json()["cumulative_summary"]
+
+
+def test_upload_image_endpoint_returns_individual_and_cumulative_analysis(monkeypatch) -> None:
+    def fake_analyze_image(image_bytes: bytes, notes: str | None = None) -> dict:
+        return {
+            "meal_name": "Paneer bowl",
+            "confidence": 0.9,
+            "summary": "Paneer bowl with rice.",
+            "detected_tags": ["paneer", "rice"],
+            "is_fallback": False,
+            "fallback_reason": None,
+            "ingredients": [
+                {
+                    "name": "Paneer",
+                    "estimated_quantity_g": 120.0,
+                    "confidence": 0.88,
+                    "macros": {
+                        "calories": 320.0,
+                        "protein_g": 22.0,
+                        "carbs_g": 8.0,
+                        "fat_g": 24.0,
+                        "fiber_g": 0.0,
+                    },
+                }
+            ],
+            "macros": {
+                "calories": 550.0,
+                "protein_g": 28.0,
+                "carbs_g": 52.0,
+                "fat_g": 25.0,
+                "fiber_g": 4.0,
+            },
+        }
+
+    monkeypatch.setattr(api_module.ai_service, "analyze_image", fake_analyze_image)
+
+    response = client.post(
+        "/upload-image",
+        params={"notes": "Paneer lunch"},
+        files={"file": ("meal.jpg", b"image-bytes", "image/jpeg")},
+    )
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["meal_name"] == "Paneer bowl"
+    assert payload["ingredients"][0]["name"] == "Paneer"
+    assert payload["is_fallback"] is False
+    assert payload["cumulative_summary"]["consumed"]["calories"] >= 550.0
+
+    history_response = client.get("/meal-history")
+    assert history_response.status_code == 200
+    assert history_response.json()[0]["ingredients"][0]["name"] == "Paneer"
 
 
 def test_accuracy_endpoint_compares_predicted_and_actual_macros() -> None:
