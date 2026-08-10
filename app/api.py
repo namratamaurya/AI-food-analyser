@@ -36,7 +36,16 @@ def read_root() -> dict[str, str]:
 
 @app.get("/health")
 def health_check() -> dict[str, str]:
-    return {"status": "ok", "ai_configured": "true" if settings.openai_api_key else "false"}
+    ai_configured = (
+        bool(settings.gemini_api_key)
+        if settings.ai_provider == "gemini"
+        else bool(settings.openai_api_key)
+    )
+    return {
+        "status": "ok",
+        "ai_provider": settings.ai_provider,
+        "ai_configured": "true" if ai_configured else "false",
+    }
 
 
 def _daily_summary_response() -> DailySummary:
@@ -115,7 +124,7 @@ async def analyze_meal(payload: MealAnalysisRequest) -> MealAnalysisResponse:
 @app.post("/upload-image", response_model=MealAnalysisResponse)
 async def upload_image(file: UploadFile = File(...), notes: str | None = None) -> MealAnalysisResponse:
     image_bytes = await file.read()
-    analysis = ai_service.analyze_image(image_bytes, notes)
+    analysis = ai_service.analyze_image(image_bytes, notes, file.content_type or "image/jpeg")
     response = _build_analysis_response(analysis)
     _store_real_analysis(response)
     response.cumulative_summary = _daily_summary_response()

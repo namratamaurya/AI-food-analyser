@@ -6,6 +6,8 @@ from fastapi.testclient import TestClient
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import app.api as api_module
+from app.config import Settings
+from app.services.ai_service import AIService
 from main import app
 
 client = TestClient(app)
@@ -21,6 +23,7 @@ def test_health_endpoint() -> None:
     response = client.get("/health")
     assert response.status_code == 200
     assert response.json()["status"] == "ok"
+    assert response.json()["ai_provider"]
 
 
 def test_cors_preflight_allows_frontend_origin() -> None:
@@ -68,7 +71,7 @@ def test_upload_image_endpoint_accepts_frontend_form_data() -> None:
 
 
 def test_upload_image_endpoint_returns_individual_and_cumulative_analysis(monkeypatch) -> None:
-    def fake_analyze_image(image_bytes: bytes, notes: str | None = None) -> dict:
+    def fake_analyze_image(image_bytes: bytes, notes: str | None = None, mime_type: str = "image/jpeg") -> dict:
         return {
             "meal_name": "Paneer bowl",
             "confidence": 0.9,
@@ -116,6 +119,20 @@ def test_upload_image_endpoint_returns_individual_and_cumulative_analysis(monkey
     history_response = client.get("/meal-history")
     assert history_response.status_code == 200
     assert history_response.json()[0]["ingredients"][0]["name"] == "Paneer"
+
+
+def test_gemini_provider_requires_gemini_key() -> None:
+    service = AIService(
+        Settings(
+            ai_provider="gemini",
+            openai_api_key=None,
+            gemini_api_key=None,
+        )
+    )
+
+    analysis = service.analyze_image(b"image-bytes", "Dinner", "image/jpeg")
+    assert analysis["is_fallback"] is True
+    assert analysis["fallback_reason"] == "GEMINI_API_KEY is not configured."
 
 
 def test_accuracy_endpoint_compares_predicted_and_actual_macros() -> None:
