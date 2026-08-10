@@ -1,7 +1,9 @@
 import base64
 import json
 from typing import Any
+from urllib.parse import urlparse
 
+import httpx
 from openai import OpenAI, OpenAIError
 
 from app.config import Settings, get_settings
@@ -59,6 +61,36 @@ class AIService:
             return self._normalize(payload, notes)
         except (OpenAIError, json.JSONDecodeError, KeyError, TypeError):
             return self._fallback_result(notes or "AI parsing failed")
+
+    def analyze_image_url(self, image_url: str | None, notes: str | None = None) -> dict[str, Any]:
+        image_bytes = self._load_image_bytes(image_url)
+        return self.analyze_image(image_bytes, notes)
+
+    def _load_image_bytes(self, image_url: str | None) -> bytes | None:
+        if not image_url:
+            return None
+
+        if image_url.startswith("data:image/"):
+            try:
+                _, encoded = image_url.split(",", 1)
+                return base64.b64decode(encoded)
+            except (ValueError, TypeError):
+                return None
+
+        parsed = urlparse(image_url)
+        if parsed.scheme not in {"http", "https"}:
+            return None
+
+        try:
+            with httpx.Client(timeout=10.0, follow_redirects=True) as client:
+                response = client.get(image_url)
+                response.raise_for_status()
+                content_type = response.headers.get("content-type", "")
+                if not content_type.startswith("image/"):
+                    return None
+                return response.content
+        except httpx.HTTPError:
+            return None
 
     def _fallback_result(self, notes: str) -> dict[str, Any]:
         ingredient_macros = {

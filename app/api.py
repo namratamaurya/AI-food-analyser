@@ -1,12 +1,20 @@
-from fastapi import FastAPI, UploadFile
+from fastapi import FastAPI, File, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import get_settings
 from app.models import DailyGoals, DailySummary, MealAnalysisRequest, MealAnalysisResponse, MacroBreakdown
 from app.services.ai_service import AIService
 from app.services.storage_service import create_storage
 
-app = FastAPI(title="Nutrition Analyzer API", version="0.2.0")
 settings = get_settings()
+app = FastAPI(title=settings.app_name, version=settings.app_version)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=list(settings.cors_origins),
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["*"],
+)
 storage = create_storage(settings)
 ai_service = AIService(settings)
 
@@ -39,7 +47,7 @@ async def analyze_meal(payload: MealAnalysisRequest) -> MealAnalysisResponse:
     }
 
     if payload.image_url:
-        analysis = ai_service.analyze_image(None, payload.notes)
+        analysis = ai_service.analyze_image_url(payload.image_url, payload.notes)
 
     response = MealAnalysisResponse(
         meal_name=analysis["meal_name"],
@@ -70,7 +78,7 @@ async def analyze_meal(payload: MealAnalysisRequest) -> MealAnalysisResponse:
 
 
 @app.post("/upload-image", response_model=MealAnalysisResponse)
-async def upload_image(file: UploadFile, notes: str | None = None) -> MealAnalysisResponse:
+async def upload_image(file: UploadFile = File(...), notes: str | None = None) -> MealAnalysisResponse:
     image_bytes = await file.read()
     analysis = ai_service.analyze_image(image_bytes, notes)
     response = MealAnalysisResponse(
