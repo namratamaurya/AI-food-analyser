@@ -61,6 +61,61 @@ def test_upload_image_endpoint_accepts_frontend_form_data() -> None:
     assert response.json()["detected_tags"]
 
 
+def test_accuracy_endpoint_compares_predicted_and_actual_macros() -> None:
+    response = client.post(
+        "/accuracy",
+        json={
+            "predicted_macros": {
+                "calories": 720,
+                "protein_g": 30,
+                "carbs_g": 80,
+                "fat_g": 20,
+                "fiber_g": 8,
+            },
+            "actual_macros": {
+                "calories": 600,
+                "protein_g": 25,
+                "carbs_g": 100,
+                "fat_g": 25,
+                "fiber_g": 10,
+            },
+        },
+    )
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["metrics"]["calories"]["percent_error"] == 20.0
+    assert payload["metrics"]["calories"]["accuracy_score"] == 80.0
+    assert payload["average_percent_error"] == 20.0
+    assert payload["overall_accuracy_score"] == 80.0
+
+
+def test_accuracy_endpoint_handles_zero_actual_values() -> None:
+    response = client.post(
+        "/accuracy",
+        json={
+            "predicted_macros": {
+                "calories": 0,
+                "protein_g": 5,
+                "carbs_g": 0,
+                "fat_g": 0,
+                "fiber_g": 0,
+            },
+            "actual_macros": {
+                "calories": 0,
+                "protein_g": 0,
+                "carbs_g": 0,
+                "fat_g": 0,
+                "fiber_g": 0,
+            },
+        },
+    )
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["metrics"]["calories"]["percent_error"] == 0.0
+    assert payload["metrics"]["protein_g"]["percent_error"] is None
+    assert payload["overall_accuracy_score"] == 100.0
+
+
 def test_goals_and_daily_summary() -> None:
     goals_response = client.post(
         "/goals",

@@ -31,6 +31,25 @@ class MealAnalysisResponse(BaseModel):
     detected_tags: list[str] = Field(default_factory=list)
 
 
+class MacroAccuracyMetric(BaseModel):
+    predicted: float
+    actual: float
+    absolute_error: float
+    percent_error: float | None = None
+    accuracy_score: float | None = None
+
+
+class AccuracyCheckRequest(BaseModel):
+    predicted_macros: MacroBreakdown
+    actual_macros: MacroBreakdown
+
+
+class AccuracyCheckResponse(BaseModel):
+    overall_accuracy_score: float | None = None
+    average_percent_error: float | None = None
+    metrics: dict[str, MacroAccuracyMetric]
+
+
 class DailyGoals(BaseModel):
     calories: float = 2000.0
     protein_g: float = 150.0

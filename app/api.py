@@ -2,7 +2,16 @@ from fastapi import FastAPI, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import get_settings
-from app.models import DailyGoals, DailySummary, MealAnalysisRequest, MealAnalysisResponse, MacroBreakdown
+from app.models import (
+    AccuracyCheckRequest,
+    AccuracyCheckResponse,
+    DailyGoals,
+    DailySummary,
+    MacroAccuracyMetric,
+    MealAnalysisRequest,
+    MealAnalysisResponse,
+    MacroBreakdown,
+)
 from app.services.ai_service import AIService
 from app.services.storage_service import create_storage
 
@@ -17,6 +26,7 @@ app.add_middleware(
 )
 storage = create_storage(settings)
 ai_service = AIService(settings)
+MACRO_FIELDS = ("calories", "protein_g", "carbs_g", "fat_g", "fiber_g")
 
 
 @app.get("/")
@@ -99,6 +109,49 @@ async def upload_image(file: UploadFile = File(...), notes: str | None = None) -
     )
     storage.add_meal({"meal_name": response.meal_name, "macros": response.macros.model_dump(), "summary": response.summary})
     return response
+
+
+@app.post("/accuracy", response_model=AccuracyCheckResponse)
+def check_accuracy(payload: AccuracyCheckRequest) -> AccuracyCheckResponse:
+    metrics: dict[str, MacroAccuracyMetric] = {}
+    percent_errors = []
+    accuracy_scores = []
+
+    for field in MACRO_FIELDS:
+        predicted = float(getattr(payload.predicted_macros, field))
+        actual = float(getattr(payload.actual_macros, field))
+        absolute_error = abs(predicted - actual)
+        percent_error = None
+        accuracy_score = None
+
+        if actual == 0:
+            if predicted == 0:
+                percent_error = 0.0
+                accuracy_score = 100.0
+        else:
+            percent_error = round((absolute_error / abs(actual)) * 100, 2)
+            accuracy_score = round(max(0.0, 100.0 - percent_error), 2)
+
+        if percent_error is not None:
+            percent_errors.append(percent_error)
+        if accuracy_score is not None:
+            accuracy_scores.append(accuracy_score)
+
+        metrics[field] = MacroAccuracyMetric(
+            predicted=predicted,
+            actual=actual,
+            absolute_error=round(absolute_error, 2),
+            percent_error=percent_error,
+            accuracy_score=accuracy_score,
+        )
+
+    average_percent_error = round(sum(percent_errors) / len(percent_errors), 2) if percent_errors else None
+    overall_accuracy_score = round(sum(accuracy_scores) / len(accuracy_scores), 2) if accuracy_scores else None
+    return AccuracyCheckResponse(
+        overall_accuracy_score=overall_accuracy_score,
+        average_percent_error=average_percent_error,
+        metrics=metrics,
+    )
 
 
 @app.post("/goals", response_model=DailyGoals)
