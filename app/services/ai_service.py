@@ -71,7 +71,7 @@ class AIService:
                 ],
             )
             raw_text = response.choices[0].message.content or "{}"
-            payload = json.loads(raw_text)
+            payload = self._parse_json_response(raw_text)
             return self._normalize(payload, notes)
         except OpenAIError as exc:
             return self._fallback_result(f"OpenAI request failed: {exc.__class__.__name__}.", notes)
@@ -131,7 +131,7 @@ class AIService:
             response.raise_for_status()
             payload = response.json()
             raw_text = payload["candidates"][0]["content"]["parts"][0]["text"]
-            return self._normalize(json.loads(raw_text), notes)
+            return self._normalize(self._parse_json_response(raw_text), notes)
         except httpx.HTTPStatusError as exc:
             return self._fallback_result(f"Gemini request failed with HTTP {exc.response.status_code}.", notes)
         except httpx.HTTPError as exc:
@@ -140,6 +140,35 @@ class AIService:
             return self._fallback_result("Gemini returned a response that was not valid JSON.", notes)
         except (KeyError, TypeError, ValueError) as exc:
             return self._fallback_result(f"Gemini response could not be normalized: {exc.__class__.__name__}.", notes)
+
+    def _parse_json_response(self, raw_text: str) -> dict[str, Any]:
+        cleaned = raw_text.strip()
+        if cleaned.startswith("```"):
+            lines = cleaned.splitlines()
+            if lines and lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+            cleaned = "\n".join(lines).strip()
+
+        try:
+            payload = json.loads(cleaned)
+        except json.JSONDecodeError:
+            decoder = json.JSONDecoder()
+            for index, char in enumerate(cleaned):
+                if char not in "{[":
+                    continue
+                try:
+                    payload, _ = decoder.raw_decode(cleaned[index:])
+                    break
+                except json.JSONDecodeError:
+                    continue
+            else:
+                raise
+
+        if not isinstance(payload, dict):
+            raise ValueError("AI response JSON must be an object.")
+        return payload
 
     def analyze_image_url(self, image_url: str | None, notes: str | None = None) -> dict[str, Any]:
         loaded = self._load_image(image_url)

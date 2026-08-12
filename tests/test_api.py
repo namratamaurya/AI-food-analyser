@@ -135,6 +135,72 @@ def test_gemini_provider_requires_gemini_key() -> None:
     assert analysis["fallback_reason"] == "GEMINI_API_KEY is not configured."
 
 
+def test_gemini_provider_accepts_markdown_wrapped_json(monkeypatch) -> None:
+    class FakeGeminiResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict:
+            return {
+                "candidates": [
+                    {
+                        "content": {
+                            "parts": [
+                                {
+                                    "text": """```json
+{
+  "meal_name": "Dal rice",
+  "confidence": 0.86,
+  "summary": "Dal rice with vegetables.",
+  "detected_tags": ["dal", "rice"],
+  "ingredients": [
+    {
+      "name": "Dal",
+      "estimated_quantity_g": 180,
+      "confidence": 0.82,
+      "macros": {
+        "calories": 210,
+        "protein_g": 12,
+        "carbs_g": 30,
+        "fat_g": 5,
+        "fiber_g": 7
+      }
+    }
+  ],
+  "macros": {
+    "calories": 520,
+    "protein_g": 18,
+    "carbs_g": 78,
+    "fat_g": 12,
+    "fiber_g": 10
+  }
+}
+```"""
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+
+    def fake_post(*args, **kwargs) -> FakeGeminiResponse:
+        return FakeGeminiResponse()
+
+    monkeypatch.setattr("app.services.ai_service.httpx.post", fake_post)
+    service = AIService(
+        Settings(
+            ai_provider="gemini",
+            openai_api_key=None,
+            gemini_api_key="test-key",
+        )
+    )
+
+    analysis = service.analyze_image(b"image-bytes", "Dinner", "image/jpeg")
+    assert analysis["is_fallback"] is False
+    assert analysis["meal_name"] == "Dal rice"
+    assert analysis["macros"]["calories"] == 520.0
+
+
 def test_accuracy_endpoint_compares_predicted_and_actual_macros() -> None:
     response = client.post(
         "/accuracy",
