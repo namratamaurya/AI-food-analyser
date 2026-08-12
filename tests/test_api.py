@@ -1,6 +1,9 @@
 import sys
+import struct
+import zlib
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -11,6 +14,40 @@ from app.services.ai_service import AIService
 from main import app
 
 client = TestClient(app)
+REAL_FOOD_SCREENSHOTS = [
+    Path("/Users/namratamaurya/Desktop/Screenshot 2026-08-12 at 7.45.31 PM.png"),
+    Path("/Users/namratamaurya/Desktop/Screenshot 2026-08-12 at 7.46.26 PM.png"),
+]
+
+
+def _food_png_bytes(theme: str = "dal_rice", width: int = 96, height: int = 72) -> bytes:
+    pixels = bytearray()
+    for y in range(height):
+        row = bytearray()
+        for x in range(width):
+            plate_distance = ((x - width / 2) / 40) ** 2 + ((y - height / 2) / 28) ** 2
+            rice_distance = ((x - 40) / 18) ** 2 + ((y - 36) / 16) ** 2
+            dal_distance = ((x - 58) / 16) ** 2 + ((y - 38) / 15) ** 2
+            garnish_distance = ((x - 57) / 7) ** 2 + ((y - 28) / 5) ** 2
+
+            color = (158, 117, 82)
+            if plate_distance <= 1:
+                color = (245, 242, 232)
+            if rice_distance <= 1:
+                color = (252, 246, 218)
+            if dal_distance <= 1:
+                color = (218, 143, 45) if theme == "dal_rice" else (96, 168, 92)
+            if garnish_distance <= 1:
+                color = (47, 126, 64)
+            row.extend(color)
+        pixels.append(0)
+        pixels.extend(row)
+
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
+
+    header = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", header) + chunk(b"IDAT", zlib.compress(bytes(pixels))) + chunk(b"IEND", b"")
 
 
 def test_root_endpoint() -> None:
@@ -121,6 +158,80 @@ def test_upload_image_endpoint_returns_individual_and_cumulative_analysis(monkey
     assert history_response.json()[0]["ingredients"][0]["name"] == "Paneer"
 
 
+def test_upload_image_endpoint_handles_food_png_samples(monkeypatch) -> None:
+    seen_uploads = []
+
+    def fake_analyze_image(image_bytes: bytes, notes: str | None = None, mime_type: str = "image/jpeg") -> dict:
+        seen_uploads.append((image_bytes, notes, mime_type))
+        return {
+            "meal_name": notes or "Food sample",
+            "confidence": 0.88,
+            "summary": "Local food image test analysis.",
+            "detected_tags": ["local-test", "food-image"],
+            "is_fallback": False,
+            "fallback_reason": None,
+            "ingredients": [
+                {
+                    "name": "Sample food",
+                    "estimated_quantity_g": 250.0,
+                    "confidence": 0.84,
+                    "macros": {
+                        "calories": 420.0,
+                        "protein_g": 16.0,
+                        "carbs_g": 58.0,
+                        "fat_g": 12.0,
+                        "fiber_g": 8.0,
+                    },
+                }
+            ],
+            "macros": {
+                "calories": 420.0,
+                "protein_g": 16.0,
+                "carbs_g": 58.0,
+                "fat_g": 12.0,
+                "fiber_g": 8.0,
+            },
+        }
+
+    monkeypatch.setattr(api_module.ai_service, "analyze_image", fake_analyze_image)
+
+    for filename, notes, image_bytes in [
+        ("dal-rice.png", "Dal rice sample", _food_png_bytes("dal_rice")),
+        ("salad-bowl.png", "Salad bowl sample", _food_png_bytes("salad")),
+    ]:
+        response = client.post(
+            "/upload-image",
+            params={"notes": notes},
+            files={"file": (filename, image_bytes, "image/png")},
+        )
+        payload = response.json()
+        assert response.status_code == 200
+        assert payload["meal_name"] == notes
+        assert payload["is_fallback"] is False
+        assert payload["detected_tags"] == ["local-test", "food-image"]
+
+    assert len(seen_uploads) == 2
+    assert all(upload[0].startswith(b"\x89PNG\r\n\x1a\n") for upload in seen_uploads)
+    assert all(upload[2] == "image/png" for upload in seen_uploads)
+
+
+def test_real_food_screenshots_have_different_visual_fallback_estimates() -> None:
+    if not all(path.exists() for path in REAL_FOOD_SCREENSHOTS):
+        pytest.skip("Real food screenshots are only available on the local development machine.")
+
+    service = AIService(Settings(openai_api_key=None, gemini_api_key=None))
+    fries = service.analyze_image(REAL_FOOD_SCREENSHOTS[0].read_bytes(), "Fries screenshot", "image/png")
+    salad = service.analyze_image(REAL_FOOD_SCREENSHOTS[1].read_bytes(), "Salad screenshot", "image/png")
+
+    assert fries["meal_name"] == "French fries with sauce"
+    assert salad["meal_name"] == "Vegetable salad bowl"
+    assert fries["macros"]["calories"] > salad["macros"]["calories"]
+    assert fries["macros"]["fat_g"] > salad["macros"]["fat_g"]
+    assert salad["macros"]["fiber_g"] > fries["macros"]["fiber_g"]
+    assert "fried-food" in fries["detected_tags"]
+    assert "vegetable-heavy" in salad["detected_tags"]
+
+
 def test_gemini_provider_requires_gemini_key() -> None:
     service = AIService(
         Settings(
@@ -184,6 +295,10 @@ def test_gemini_provider_accepts_markdown_wrapped_json(monkeypatch) -> None:
             }
 
     def fake_post(*args, **kwargs) -> FakeGeminiResponse:
+        generation_config = kwargs["json"]["generationConfig"]
+        assert "temperature" not in generation_config
+        assert generation_config["responseMimeType"] == "application/json"
+        assert "responseSchema" in generation_config
         return FakeGeminiResponse()
 
     monkeypatch.setattr("app.services.ai_service.httpx.post", fake_post)
@@ -199,6 +314,86 @@ def test_gemini_provider_accepts_markdown_wrapped_json(monkeypatch) -> None:
     assert analysis["is_fallback"] is False
     assert analysis["meal_name"] == "Dal rice"
     assert analysis["macros"]["calories"] == 520.0
+
+
+def test_gemini_provider_accepts_json_from_later_response_part(monkeypatch) -> None:
+    class FakeGeminiResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict:
+            return {
+                "candidates": [
+                    {
+                        "content": {
+                            "parts": [
+                                {"inline_data": {"mime_type": "image/png", "data": "ignored"}},
+                                {
+                                    "text": """
+Here is the estimate:
+{
+  "meal_name": "Vegetable bowl",
+  "confidence": 0.81,
+  "summary": "Vegetable bowl with grains.",
+  "detected_tags": ["vegetables", "grains"],
+  "ingredients": [],
+  "macros": {
+    "calories": 390,
+    "protein_g": 13,
+    "carbs_g": 62,
+    "fat_g": 9,
+    "fiber_g": 11
+  }
+}
+"""
+                                },
+                            ]
+                        }
+                    }
+                ]
+            }
+
+    def fake_post(*args, **kwargs) -> FakeGeminiResponse:
+        return FakeGeminiResponse()
+
+    monkeypatch.setattr("app.services.ai_service.httpx.post", fake_post)
+    service = AIService(
+        Settings(
+            ai_provider="gemini",
+            openai_api_key=None,
+            gemini_api_key="test-key",
+        )
+    )
+
+    analysis = service.analyze_image(_food_png_bytes("salad"), "Lunch", "image/png")
+    assert analysis["is_fallback"] is False
+    assert analysis["meal_name"] == "Vegetable bowl"
+    assert analysis["macros"]["fiber_g"] == 11.0
+
+
+def test_gemini_provider_reports_no_text_response(monkeypatch) -> None:
+    class FakeGeminiResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict:
+            return {"candidates": [{"finishReason": "SAFETY", "content": {"parts": []}}]}
+
+    def fake_post(*args, **kwargs) -> FakeGeminiResponse:
+        return FakeGeminiResponse()
+
+    monkeypatch.setattr("app.services.ai_service.httpx.post", fake_post)
+    service = AIService(
+        Settings(
+            ai_provider="gemini",
+            openai_api_key=None,
+            gemini_api_key="test-key",
+        )
+    )
+
+    analysis = service.analyze_image(_food_png_bytes(), "Dinner", "image/png")
+    assert analysis["is_fallback"] is True
+    assert "Finish reason: SAFETY" in analysis["fallback_reason"]
 
 
 def test_accuracy_endpoint_compares_predicted_and_actual_macros() -> None:

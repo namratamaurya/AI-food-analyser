@@ -61,3 +61,19 @@ Environment variables can be set in a `.env` file or exported in your shell. See
 
 - If no OpenAI API key is configured, the service uses a deterministic fallback response so development can continue.
 - The current implementation uses in-memory storage; MongoDB can be added later via a repository pattern.
+
+## Pre-deploy AI image smoke test
+
+Run this before deploying changes to image analysis:
+
+```bash
+AI_PROVIDER=gemini GEMINI_API_KEY=your_key python3 scripts/smoke_test_food_images.py
+```
+
+To test specific local images:
+
+```bash
+python3 scripts/smoke_test_food_images.py "/path/to/food-1.png" "/path/to/food-2.png"
+```
+
+The script generates two local food PNG samples when no paths are provided, or sends the provided files through the configured AI provider. If no provider key is configured, it validates the local visual fallback instead. It exits with a failure if analysis returns a generic fallback or incomplete nutrition values.
