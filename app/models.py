@@ -36,6 +36,51 @@ class DailySummary(BaseModel):
     remaining: MacroBreakdown
 
 
+class PeriodSummary(BaseModel):
+    start_date: str
+    end_date: str
+    consumed: MacroBreakdown
+    scan_count: int = 0
+
+
+class StreakSummary(BaseModel):
+    current_days: int = 0
+    longest_days: int = 0
+    last_scan_date: str | None = None
+
+
+class UserProfileResponse(BaseModel):
+    user_id: str
+    goals: DailyGoals
+    today: DailySummary
+    week: PeriodSummary
+    streaks: StreakSummary
+    total_scans: int = 0
+
+
+class MealHistoryItem(BaseModel):
+    meal_name: str
+    confidence: float
+    macros: MacroBreakdown
+    summary: str
+    ingredients: list[IngredientAnalysis] = Field(default_factory=list)
+    detected_tags: list[str] = Field(default_factory=list)
+    is_fallback: bool = False
+    fallback_reason: str | None = None
+    user_id: str | None = None
+    created_at: str
+    image_url: str | None = None
+    image_mime_type: str | None = None
+
+
+class UserHistoryResponse(BaseModel):
+    user_id: str
+    months: int
+    scan_count: int
+    total_macros: MacroBreakdown
+    meals: list[MealHistoryItem]
+
+
 class MealAnalysisResponse(BaseModel):
     meal_name: str
     confidence: float
@@ -65,4 +110,3 @@ class AccuracyCheckResponse(BaseModel):
     overall_accuracy_score: float | None = None
     average_percent_error: float | None = None
     metrics: dict[str, MacroAccuracyMetric]
-

@@ -1,5 +1,6 @@
 import sys
 import struct
+from datetime import datetime, timedelta, timezone
 import zlib
 from pathlib import Path
 
@@ -462,3 +463,145 @@ def test_goals_and_daily_summary() -> None:
     summary_response = client.get("/daily-summary")
     assert summary_response.status_code == 200
     assert summary_response.json()["goals"]["calories"] == 2200
+
+
+def test_user_profile_tracks_multiple_daily_scans_and_history(monkeypatch) -> None:
+    user_id = "profile-test-user"
+    analyses = [
+        {
+            "meal_name": "French fries",
+            "confidence": 0.9,
+            "summary": "Fries with ketchup.",
+            "detected_tags": ["fries"],
+            "is_fallback": False,
+            "fallback_reason": None,
+            "ingredients": [
+                {
+                    "name": "Potato",
+                    "estimated_quantity_g": 180.0,
+                    "confidence": 0.9,
+                    "macros": {
+                        "calories": 260.0,
+                        "protein_g": 4.0,
+                        "carbs_g": 45.0,
+                        "fat_g": 8.0,
+                        "fiber_g": 4.0,
+                    },
+                }
+            ],
+            "macros": {
+                "calories": 320.0,
+                "protein_g": 5.0,
+                "carbs_g": 52.0,
+                "fat_g": 10.0,
+                "fiber_g": 5.0,
+            },
+        },
+        {
+            "meal_name": "Salad bowl",
+            "confidence": 0.92,
+            "summary": "Vegetable bowl with seeds.",
+            "detected_tags": ["salad", "healthy"],
+            "is_fallback": False,
+            "fallback_reason": None,
+            "ingredients": [
+                {
+                    "name": "Mixed vegetables",
+                    "estimated_quantity_g": 300.0,
+                    "confidence": 0.9,
+                    "macros": {
+                        "calories": 180.0,
+                        "protein_g": 7.0,
+                        "carbs_g": 24.0,
+                        "fat_g": 7.0,
+                        "fiber_g": 10.0,
+                    },
+                }
+            ],
+            "macros": {
+                "calories": 280.0,
+                "protein_g": 10.0,
+                "carbs_g": 30.0,
+                "fat_g": 14.0,
+                "fiber_g": 13.0,
+            },
+        },
+    ]
+
+    def fake_analyze_image(image_bytes: bytes, notes: str | None = None, mime_type: str = "image/jpeg") -> dict:
+        return analyses.pop(0)
+
+    monkeypatch.setattr(api_module.ai_service, "analyze_image", fake_analyze_image)
+
+    for name in ["fries.png", "salad.png"]:
+        response = client.post(
+            "/upload-image",
+            params={"notes": name, "user_id": user_id},
+            files={"file": (name, _food_png_bytes(), "image/png")},
+        )
+        assert response.status_code == 200
+
+    profile_response = client.get(f"/users/{user_id}/profile")
+    assert profile_response.status_code == 200
+    profile = profile_response.json()
+    assert profile["today"]["consumed"]["calories"] == 600.0
+    assert profile["today"]["consumed"]["fiber_g"] == 18.0
+    assert profile["week"]["scan_count"] == 2
+    assert profile["week"]["consumed"]["calories"] == 600.0
+    assert profile["streaks"]["current_days"] >= 1
+    assert profile["total_scans"] == 2
+
+    history_response = client.get(f"/users/{user_id}/history")
+    history = history_response.json()
+    assert history_response.status_code == 200
+    assert history["months"] == 3
+    assert history["scan_count"] == 2
+    assert history["total_macros"]["calories"] == 600.0
+    assert history["meals"][0]["created_at"]
+    assert history["meals"][0]["image_url"].startswith("data:image/png;base64,")
+    assert history["meals"][0]["ingredients"][0]["name"]
+
+
+def test_user_history_defaults_to_last_three_months() -> None:
+    user_id = "history-window-user"
+    recent = datetime.now(timezone.utc).isoformat()
+    old = (datetime.now(timezone.utc) - timedelta(days=120)).isoformat()
+    api_module.storage.add_meal(
+        {
+            "meal_name": "Recent meal",
+            "confidence": 0.9,
+            "macros": {"calories": 300.0, "protein_g": 12.0, "carbs_g": 40.0, "fat_g": 8.0, "fiber_g": 6.0},
+            "summary": "Recent.",
+            "ingredients": [],
+            "detected_tags": [],
+            "is_fallback": False,
+            "fallback_reason": None,
+            "user_id": user_id,
+            "created_at": recent,
+            "image_url": "https://example.com/recent.png",
+            "image_mime_type": "image/png",
+        }
+    )
+    api_module.storage.add_meal(
+        {
+            "meal_name": "Old meal",
+            "confidence": 0.9,
+            "macros": {"calories": 900.0, "protein_g": 20.0, "carbs_g": 100.0, "fat_g": 30.0, "fiber_g": 4.0},
+            "summary": "Old.",
+            "ingredients": [],
+            "detected_tags": [],
+            "is_fallback": False,
+            "fallback_reason": None,
+            "user_id": user_id,
+            "created_at": old,
+            "image_url": "https://example.com/old.png",
+            "image_mime_type": "image/png",
+        }
+    )
+
+    response = client.get(f"/users/{user_id}/history")
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["scan_count"] == 1
+    assert payload["meals"][0]["meal_name"] == "Recent meal"
+    assert payload["total_macros"]["calories"] == 300.0

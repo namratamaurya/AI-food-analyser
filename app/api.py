@@ -1,3 +1,5 @@
+import base64
+
 from fastapi import FastAPI, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -7,10 +9,15 @@ from app.models import (
     AccuracyCheckResponse,
     DailyGoals,
     DailySummary,
+    MealHistoryItem,
+    UserHistoryResponse,
+    UserProfileResponse,
     MacroAccuracyMetric,
     MealAnalysisRequest,
     MealAnalysisResponse,
     MacroBreakdown,
+    PeriodSummary,
+    StreakSummary,
 )
 from app.services.ai_service import AIService
 from app.services.storage_service import create_storage
@@ -48,8 +55,8 @@ def health_check() -> dict[str, str]:
     }
 
 
-def _daily_summary_response() -> DailySummary:
-    summary = storage.get_daily_summary()
+def _daily_summary_response(user_id: str | None = None) -> DailySummary:
+    summary = storage.get_daily_summary(user_id or "default")
     return DailySummary(
         goals=summary["goals"],
         consumed=summary["consumed"],
@@ -78,10 +85,12 @@ def _build_analysis_response(analysis: dict) -> MealAnalysisResponse:
     )
 
 
-def _store_real_analysis(response: MealAnalysisResponse, user_id: str | None = None) -> None:
-    if response.is_fallback:
-        return
-
+def _store_analysis(
+    response: MealAnalysisResponse,
+    user_id: str | None = None,
+    image_url: str | None = None,
+    image_mime_type: str | None = None,
+) -> None:
     storage.add_meal(
         {
             "meal_name": response.meal_name,
@@ -90,8 +99,37 @@ def _store_real_analysis(response: MealAnalysisResponse, user_id: str | None = N
             "summary": response.summary,
             "ingredients": [ingredient.model_dump() for ingredient in response.ingredients],
             "detected_tags": response.detected_tags,
+            "is_fallback": response.is_fallback,
+            "fallback_reason": response.fallback_reason,
             "user_id": user_id,
+            "image_url": image_url,
+            "image_mime_type": image_mime_type,
         }
+    )
+
+
+def _image_data_url(image_bytes: bytes, mime_type: str) -> str:
+    encoded = base64.b64encode(image_bytes).decode("utf-8")
+    return f"data:{mime_type};base64,{encoded}"
+
+
+def _history_response(user_id: str, months: int = 3) -> UserHistoryResponse:
+    meals = storage.get_meal_history(user_id=user_id, months=months)
+    total = MacroBreakdown()
+    for meal in meals:
+        macros = meal.get("macros", {})
+        total.calories += float(macros.get("calories", 0.0))
+        total.protein_g += float(macros.get("protein_g", 0.0))
+        total.carbs_g += float(macros.get("carbs_g", 0.0))
+        total.fat_g += float(macros.get("fat_g", 0.0))
+        total.fiber_g += float(macros.get("fiber_g", 0.0))
+
+    return UserHistoryResponse(
+        user_id=user_id,
+        months=months,
+        scan_count=len(meals),
+        total_macros=total,
+        meals=[MealHistoryItem(**meal) for meal in meals],
     )
 
 
@@ -116,18 +154,24 @@ async def analyze_meal(payload: MealAnalysisRequest) -> MealAnalysisResponse:
         analysis = ai_service.analyze_image_url(payload.image_url, payload.notes)
 
     response = _build_analysis_response(analysis)
-    _store_real_analysis(response, payload.user_id)
-    response.cumulative_summary = _daily_summary_response()
+    _store_analysis(response, payload.user_id, payload.image_url, "image/url" if payload.image_url else None)
+    response.cumulative_summary = _daily_summary_response(payload.user_id)
     return response
 
 
 @app.post("/upload-image", response_model=MealAnalysisResponse)
-async def upload_image(file: UploadFile = File(...), notes: str | None = None) -> MealAnalysisResponse:
+async def upload_image(
+    file: UploadFile = File(...),
+    notes: str | None = None,
+    user_id: str | None = None,
+) -> MealAnalysisResponse:
     image_bytes = await file.read()
-    analysis = ai_service.analyze_image(image_bytes, notes, file.content_type or "image/jpeg")
+    mime_type = file.content_type or "image/jpeg"
+    analysis = ai_service.analyze_image(image_bytes, notes, mime_type)
     response = _build_analysis_response(analysis)
-    _store_real_analysis(response)
-    response.cumulative_summary = _daily_summary_response()
+    image_url = _image_data_url(image_bytes, mime_type) if image_bytes else None
+    _store_analysis(response, user_id, image_url, mime_type)
+    response.cumulative_summary = _daily_summary_response(user_id)
     return response
 
 
@@ -175,15 +219,48 @@ def check_accuracy(payload: AccuracyCheckRequest) -> AccuracyCheckResponse:
 
 
 @app.post("/goals", response_model=DailyGoals)
-def set_goals(payload: DailyGoals) -> DailyGoals:
-    return storage.set_goals(payload)
+def set_goals(payload: DailyGoals, user_id: str | None = None) -> DailyGoals:
+    return storage.set_goals(payload, user_id or "default")
 
 
 @app.get("/daily-summary", response_model=DailySummary)
-def daily_summary() -> DailySummary:
-    return _daily_summary_response()
+def daily_summary(user_id: str | None = None) -> DailySummary:
+    return _daily_summary_response(user_id)
+
+
+@app.get("/users/{user_id}/profile", response_model=UserProfileResponse)
+def user_profile(user_id: str) -> UserProfileResponse:
+    profile = storage.get_user_profile(user_id)
+    return UserProfileResponse(
+        user_id=profile["user_id"],
+        goals=profile["goals"],
+        today=DailySummary(**profile["today"]),
+        week=PeriodSummary(**profile["week"]),
+        streaks=StreakSummary(**profile["streaks"]),
+        total_scans=profile["total_scans"],
+    )
+
+
+@app.post("/users/{user_id}/goals", response_model=DailyGoals)
+def set_user_goals(user_id: str, payload: DailyGoals) -> DailyGoals:
+    return storage.set_goals(payload, user_id)
+
+
+@app.get("/users/{user_id}/daily-summary", response_model=DailySummary)
+def user_daily_summary(user_id: str) -> DailySummary:
+    return _daily_summary_response(user_id)
+
+
+@app.get("/users/{user_id}/weekly-summary", response_model=PeriodSummary)
+def user_weekly_summary(user_id: str) -> PeriodSummary:
+    return PeriodSummary(**storage.get_weekly_summary(user_id))
+
+
+@app.get("/users/{user_id}/history", response_model=UserHistoryResponse)
+def user_history(user_id: str, months: int = 3) -> UserHistoryResponse:
+    return _history_response(user_id, months)
 
 
 @app.get("/meal-history")
-def meal_history() -> list[dict]:
-    return storage.get_meal_history()
+def meal_history(user_id: str | None = None, months: int | None = None) -> list[dict]:
+    return storage.get_meal_history(user_id=user_id, months=months)

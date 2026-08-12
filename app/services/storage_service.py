@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from datetime import datetime, timezone
+from datetime import date, datetime, time, timedelta, timezone
 
 from pymongo import MongoClient
 from pymongo.errors import PyMongoError
@@ -8,10 +8,12 @@ from bson import ObjectId
 from app.config import Settings
 from app.models import DailyGoals, MacroBreakdown
 
+DEFAULT_USER_ID = "default"
+
 
 class StorageRepository(ABC):
     @abstractmethod
-    def set_goals(self, goals: DailyGoals) -> DailyGoals:
+    def set_goals(self, goals: DailyGoals, user_id: str = DEFAULT_USER_ID) -> DailyGoals:
         raise NotImplementedError
 
     @abstractmethod
@@ -19,50 +21,99 @@ class StorageRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def get_daily_summary(self) -> dict:
+    def get_daily_summary(self, user_id: str = DEFAULT_USER_ID) -> dict:
         raise NotImplementedError
 
     @abstractmethod
-    def get_meal_history(self) -> list[dict]:
+    def get_meal_history(self, user_id: str | None = None, months: int | None = None) -> list[dict]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_weekly_summary(self, user_id: str = DEFAULT_USER_ID) -> dict:
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_user_profile(self, user_id: str = DEFAULT_USER_ID) -> dict:
         raise NotImplementedError
 
 
 class InMemoryStorage(StorageRepository):
     def __init__(self) -> None:
-        self.goals = DailyGoals()
-        self.consumed = MacroBreakdown()
+        self.goals_by_user: dict[str, DailyGoals] = {DEFAULT_USER_ID: DailyGoals()}
         self.meal_history: list[dict] = []
 
-    def set_goals(self, goals: DailyGoals) -> DailyGoals:
-        self.goals = goals
+    def set_goals(self, goals: DailyGoals, user_id: str = DEFAULT_USER_ID) -> DailyGoals:
+        self.goals_by_user[user_id] = goals
         return goals
 
     def add_meal(self, meal: dict) -> dict:
-        document = {**meal, "created_at": datetime.now(timezone.utc).isoformat()}
+        document = {
+            **meal,
+            "user_id": meal.get("user_id") or DEFAULT_USER_ID,
+            "created_at": meal.get("created_at") or datetime.now(timezone.utc).isoformat(),
+        }
         self.meal_history.append(document)
-        self.consumed.calories += meal["macros"]["calories"]
-        self.consumed.protein_g += meal["macros"]["protein_g"]
-        self.consumed.carbs_g += meal["macros"]["carbs_g"]
-        self.consumed.fat_g += meal["macros"]["fat_g"]
-        self.consumed.fiber_g += meal["macros"]["fiber_g"]
         return document
 
-    def get_daily_summary(self) -> dict:
+    def get_daily_summary(self, user_id: str = DEFAULT_USER_ID) -> dict:
+        today = datetime.now(timezone.utc).date()
+        meals = [
+            meal
+            for meal in self.meal_history
+            if meal.get("user_id", DEFAULT_USER_ID) == user_id and _parse_created_date(meal.get("created_at")) == today
+        ]
+        consumed = _sum_macros(meals)
+        goals = self.goals_by_user.get(user_id, DailyGoals())
         remaining = MacroBreakdown(
-            calories=self.goals.calories - self.consumed.calories,
-            protein_g=self.goals.protein_g - self.consumed.protein_g,
-            carbs_g=self.goals.carbs_g - self.consumed.carbs_g,
-            fat_g=self.goals.fat_g - self.consumed.fat_g,
-            fiber_g=self.goals.fiber_g - self.consumed.fiber_g,
+            calories=goals.calories - consumed.calories,
+            protein_g=goals.protein_g - consumed.protein_g,
+            carbs_g=goals.carbs_g - consumed.carbs_g,
+            fat_g=goals.fat_g - consumed.fat_g,
+            fiber_g=goals.fiber_g - consumed.fiber_g,
         )
         return {
-            "goals": self.goals,
-            "consumed": self.consumed,
+            "goals": goals,
+            "consumed": consumed,
             "remaining": remaining,
         }
 
-    def get_meal_history(self) -> list[dict]:
-        return self.meal_history
+    def get_meal_history(self, user_id: str | None = None, months: int | None = None) -> list[dict]:
+        meals = self.meal_history
+        if user_id is not None:
+            meals = [meal for meal in meals if meal.get("user_id", DEFAULT_USER_ID) == user_id]
+        if months is not None:
+            cutoff = _month_cutoff(months)
+            meals = [meal for meal in meals if _parse_created_datetime(meal.get("created_at")) >= cutoff]
+        return sorted(meals, key=lambda meal: meal.get("created_at", ""), reverse=True)
+
+    def get_weekly_summary(self, user_id: str = DEFAULT_USER_ID) -> dict:
+        end = datetime.now(timezone.utc)
+        start = end - timedelta(days=6)
+        start_day = start.date()
+        end_day = end.date()
+        meals = [
+            meal
+            for meal in self.meal_history
+            if meal.get("user_id", DEFAULT_USER_ID) == user_id
+            and start_day <= _parse_created_date(meal.get("created_at")) <= end_day
+        ]
+        return {
+            "start_date": start_day.isoformat(),
+            "end_date": end_day.isoformat(),
+            "consumed": _sum_macros(meals),
+            "scan_count": len(meals),
+        }
+
+    def get_user_profile(self, user_id: str = DEFAULT_USER_ID) -> dict:
+        history = self.get_meal_history(user_id=user_id)
+        return {
+            "user_id": user_id,
+            "goals": self.goals_by_user.get(user_id, DailyGoals()),
+            "today": self.get_daily_summary(user_id),
+            "week": self.get_weekly_summary(user_id),
+            "streaks": _calculate_streaks(history),
+            "total_scans": len(history),
+        }
 
 
 class MongoStorage(StorageRepository):
@@ -93,33 +144,35 @@ class MongoStorage(StorageRepository):
             self._available = False
             return False
 
-    def set_goals(self, goals: DailyGoals) -> DailyGoals:
+    def set_goals(self, goals: DailyGoals, user_id: str = DEFAULT_USER_ID) -> DailyGoals:
         if self._ensure_connection():
-            payload = {"_id": "default", **goals.model_dump()}
-            self._goals_collection.replace_one({"_id": "default"}, payload, upsert=True)
+            payload = {"_id": user_id, "user_id": user_id, **goals.model_dump()}
+            self._goals_collection.replace_one({"_id": user_id}, payload, upsert=True)
             return goals
-        return self._fallback.set_goals(goals)
+        return self._fallback.set_goals(goals, user_id)
 
     def add_meal(self, meal: dict) -> dict:
         if self._ensure_connection():
-            document = {**meal, "created_at": datetime.now(timezone.utc).isoformat()}
+            document = {
+                **meal,
+                "user_id": meal.get("user_id") or DEFAULT_USER_ID,
+                "created_at": meal.get("created_at") or datetime.now(timezone.utc).isoformat(),
+            }
             result = self._meals_collection.insert_one(document)
             return self._serialize_document({**document, "_id": result.inserted_id})
         return self._fallback.add_meal(meal)
 
-    def get_daily_summary(self) -> dict:
+    def get_daily_summary(self, user_id: str = DEFAULT_USER_ID) -> dict:
         if self._ensure_connection():
-            goal_doc = self._goals_collection.find_one({"_id": "default"})
+            today = datetime.now(timezone.utc).date()
+            goal_doc = self._goals_collection.find_one({"_id": user_id})
             goals = DailyGoals(**{k: v for k, v in goal_doc.items() if k != "_id"}) if goal_doc else DailyGoals()
-            meals = list(self._meals_collection.find())
-            consumed = MacroBreakdown()
-            for meal in meals:
-                macros = meal.get("macros", {})
-                consumed.calories += float(macros.get("calories", 0.0))
-                consumed.protein_g += float(macros.get("protein_g", 0.0))
-                consumed.carbs_g += float(macros.get("carbs_g", 0.0))
-                consumed.fat_g += float(macros.get("fat_g", 0.0))
-                consumed.fiber_g += float(macros.get("fiber_g", 0.0))
+            meals = [
+                meal
+                for meal in self._meals_collection.find({"user_id": user_id})
+                if _parse_created_date(meal.get("created_at")) == today
+            ]
+            consumed = _sum_macros(meals)
             remaining = MacroBreakdown(
                 calories=goals.calories - consumed.calories,
                 protein_g=goals.protein_g - consumed.protein_g,
@@ -128,12 +181,53 @@ class MongoStorage(StorageRepository):
                 fiber_g=goals.fiber_g - consumed.fiber_g,
             )
             return {"goals": goals, "consumed": consumed, "remaining": remaining}
-        return self._fallback.get_daily_summary()
+        return self._fallback.get_daily_summary(user_id)
 
-    def get_meal_history(self) -> list[dict]:
+    def get_meal_history(self, user_id: str | None = None, months: int | None = None) -> list[dict]:
         if self._ensure_connection():
-            return [self._serialize_document(meal) for meal in self._meals_collection.find().sort("created_at", -1)]
-        return self._fallback.get_meal_history()
+            query = {}
+            if user_id is not None:
+                query["user_id"] = user_id
+            if months is not None:
+                query["created_at"] = {"$gte": _month_cutoff(months).isoformat()}
+            return [self._serialize_document(meal) for meal in self._meals_collection.find(query).sort("created_at", -1)]
+        return self._fallback.get_meal_history(user_id, months)
+
+    def get_weekly_summary(self, user_id: str = DEFAULT_USER_ID) -> dict:
+        if self._ensure_connection():
+            end = datetime.now(timezone.utc)
+            start = end - timedelta(days=6)
+            meals = list(
+                self._meals_collection.find(
+                    {
+                        "user_id": user_id,
+                        "created_at": {"$gte": datetime.combine(start.date(), time.min, timezone.utc).isoformat()},
+                    }
+                )
+            )
+            return {
+                "start_date": start.date().isoformat(),
+                "end_date": end.date().isoformat(),
+                "consumed": _sum_macros(meals),
+                "scan_count": len(meals),
+            }
+        return self._fallback.get_weekly_summary(user_id)
+
+    def get_user_profile(self, user_id: str = DEFAULT_USER_ID) -> dict:
+        if self._ensure_connection():
+            history = self.get_meal_history(user_id=user_id)
+            daily = self.get_daily_summary(user_id)
+            goal_doc = self._goals_collection.find_one({"_id": user_id})
+            goals = DailyGoals(**{k: v for k, v in goal_doc.items() if k not in {"_id", "user_id"}}) if goal_doc else DailyGoals()
+            return {
+                "user_id": user_id,
+                "goals": goals,
+                "today": daily,
+                "week": self.get_weekly_summary(user_id),
+                "streaks": _calculate_streaks(history),
+                "total_scans": len(history),
+            }
+        return self._fallback.get_user_profile(user_id)
 
     def _serialize_document(self, document: dict) -> dict:
         serialized = {}
@@ -147,3 +241,73 @@ class MongoStorage(StorageRepository):
 
 def create_storage(settings: Settings) -> StorageRepository:
     return MongoStorage(settings)
+
+
+def _month_cutoff(months: int) -> datetime:
+    days = max(1, months) * 30
+    return datetime.now(timezone.utc) - timedelta(days=days)
+
+
+def _parse_created_datetime(created_at: str | None) -> datetime:
+    if not created_at:
+        return datetime.min.replace(tzinfo=timezone.utc)
+    try:
+        parsed = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+    except ValueError:
+        return datetime.min.replace(tzinfo=timezone.utc)
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _parse_created_date(created_at: str | None) -> date:
+    return _parse_created_datetime(created_at).date()
+
+
+def _sum_macros(meals: list[dict]) -> MacroBreakdown:
+    consumed = MacroBreakdown()
+    for meal in meals:
+        macros = meal.get("macros", {})
+        consumed.calories += float(macros.get("calories", 0.0))
+        consumed.protein_g += float(macros.get("protein_g", 0.0))
+        consumed.carbs_g += float(macros.get("carbs_g", 0.0))
+        consumed.fat_g += float(macros.get("fat_g", 0.0))
+        consumed.fiber_g += float(macros.get("fiber_g", 0.0))
+    return consumed
+
+
+def _calculate_streaks(meals: list[dict]) -> dict:
+    scan_dates = sorted({_parse_created_date(meal.get("created_at")) for meal in meals}, reverse=True)
+    if not scan_dates:
+        return {"current_days": 0, "longest_days": 0, "last_scan_date": None}
+
+    today = datetime.now(timezone.utc).date()
+    current = 0
+    expected = today
+    if scan_dates[0] == today - timedelta(days=1):
+        expected = today - timedelta(days=1)
+    elif scan_dates[0] != today:
+        expected = date.min
+
+    for scan_date in scan_dates:
+        if scan_date == expected:
+            current += 1
+            expected -= timedelta(days=1)
+        elif scan_date < expected:
+            break
+
+    longest = 1
+    running = 1
+    for previous, scan_date in zip(scan_dates, scan_dates[1:]):
+        if previous - scan_date == timedelta(days=1):
+            running += 1
+        else:
+            longest = max(longest, running)
+            running = 1
+    longest = max(longest, running)
+
+    return {
+        "current_days": current,
+        "longest_days": longest,
+        "last_scan_date": scan_dates[0].isoformat(),
+    }
