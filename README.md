@@ -52,7 +52,7 @@ Environment variables can be set in a `.env` file or exported in your shell. See
 - GET /: health check message
 - GET /health: service health and AI configuration status
 - POST /analyze-meal: analyze a meal from an image URL and notes
-- POST /upload-image: upload an image file for direct analysis, with optional `user_id`
+- POST /upload-image: upload an image file for direct analysis, with optional `user_id`; responses include ingredients and calorie-reduction tips
 - POST /goals: set daily nutrition goals
 - GET /daily-summary: get consumed vs remaining nutrition
 - GET /meal-history: list stored meal entries
@@ -60,7 +60,7 @@ Environment variables can be set in a `.env` file or exported in your shell. See
 - POST /users/{user_id}/goals: set nutrition goals for a specific user
 - GET /users/{user_id}/daily-summary: get today's calories and macros for a user
 - GET /users/{user_id}/weekly-summary: get rolling 7-day calories and macros for a user
-- GET /users/{user_id}/history: get the last 3 months of scans by default, including calorie split, ingredients, timestamp, and image reference
+- GET /users/{user_id}/history: get the last 3 months of scans by default, including calorie split, ingredients, tips, timestamp, and image reference
 
 ## Notes
 

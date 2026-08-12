@@ -64,6 +64,7 @@ class MealHistoryItem(BaseModel):
     macros: MacroBreakdown
     summary: str
     ingredients: list[IngredientAnalysis] = Field(default_factory=list)
+    tips: list[str] = Field(default_factory=list)
     detected_tags: list[str] = Field(default_factory=list)
     is_fallback: bool = False
     fallback_reason: str | None = None
@@ -87,6 +88,7 @@ class MealAnalysisResponse(BaseModel):
     macros: MacroBreakdown
     summary: str
     ingredients: list[IngredientAnalysis] = Field(default_factory=list)
+    tips: list[str] = Field(default_factory=list)
     detected_tags: list[str] = Field(default_factory=list)
     is_fallback: bool = False
     fallback_reason: str | None = None

@@ -79,6 +79,7 @@ def _build_analysis_response(analysis: dict) -> MealAnalysisResponse:
             }
             for ingredient in analysis.get("ingredients", [])
         ],
+        tips=analysis.get("tips", []),
         detected_tags=analysis.get("detected_tags", []),
         is_fallback=analysis.get("is_fallback", False),
         fallback_reason=analysis.get("fallback_reason"),
@@ -98,6 +99,7 @@ def _store_analysis(
             "macros": response.macros.model_dump(),
             "summary": response.summary,
             "ingredients": [ingredient.model_dump() for ingredient in response.ingredients],
+            "tips": response.tips,
             "detected_tags": response.detected_tags,
             "is_fallback": response.is_fallback,
             "fallback_reason": response.fallback_reason,
@@ -147,6 +149,10 @@ async def analyze_meal(payload: MealAnalysisRequest) -> MealAnalysisResponse:
         },
         "summary": "A balanced meal estimate generated from the provided context.",
         "ingredients": [],
+        "tips": [
+            "Keep portions aligned with your daily calorie goal.",
+            "Add vegetables or lean protein if you need more fullness.",
+        ],
         "detected_tags": ["balanced"],
     }
 

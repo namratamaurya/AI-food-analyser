@@ -56,7 +56,8 @@ class AIService:
                         "content": (
                             "You are a nutrition analysis assistant. Inspect the meal image and return JSON only. "
                             "Provide meal_name, confidence, summary, detected_tags, ingredients with name, "
-                            "estimated_quantity_g, confidence, macros with calories/protein_g/carbs_g/fat_g/fiber_g."
+                            "estimated_quantity_g, confidence, macros with calories/protein_g/carbs_g/fat_g/fiber_g, "
+                            "and tips with 2-4 practical suggestions for reducing calories or improving this meal."
                         ),
                     },
                     {
@@ -66,6 +67,7 @@ class AIService:
                                 "type": "text",
                                 "text": (
                                     "Analyze the meal image and estimate nutrition. "
+                                    "Include practical tips the user can apply to reduce calories or make the meal healthier. "
                                     f"Extra context: {notes or 'No notes provided'}."
                                 ),
                             },
@@ -118,9 +120,10 @@ class AIService:
                                 {
                                     "text": (
                                         "Analyze this meal image and estimate nutrition. Return JSON only with "
-                                        "meal_name, confidence, summary, detected_tags, ingredients, and macros. "
+                                        "meal_name, confidence, summary, detected_tags, ingredients, macros, and tips. "
                                         "Each ingredient must include name, estimated_quantity_g, confidence, and "
                                         "macros with calories, protein_g, carbs_g, fat_g, fiber_g. "
+                                        "Tips must be 2-4 short, practical suggestions for reducing calories or improving this meal. "
                                         f"Extra context: {notes or 'No notes provided'}."
                                     )
                                 },
@@ -223,6 +226,10 @@ class AIService:
                     "type": "array",
                     "items": {"type": "string"},
                 },
+                "tips": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
                 "ingredients": {
                     "type": "array",
                     "items": {
@@ -238,7 +245,7 @@ class AIService:
                 },
                 "macros": macro_schema,
             },
-            "required": ["meal_name", "confidence", "summary", "detected_tags", "ingredients", "macros"],
+            "required": ["meal_name", "confidence", "summary", "detected_tags", "tips", "ingredients", "macros"],
         }
 
     def analyze_image_url(self, image_url: str | None, notes: str | None = None) -> dict[str, Any]:
@@ -290,6 +297,7 @@ class AIService:
                     f"Reason: {reason}{note_text} {visual_estimate['summary']}"
                 ),
                 "detected_tags": ["fallback", "visual-heuristic", *visual_estimate["detected_tags"]],
+                "tips": visual_estimate["tips"],
                 "is_fallback": True,
                 "fallback_reason": visual_reason,
             }
@@ -307,6 +315,10 @@ class AIService:
             "confidence": 0.72,
             "summary": f"AI image analysis did not complete, so this is a placeholder estimate. Reason: {reason}{note_text}",
             "detected_tags": ["fallback", "image-analysis"],
+            "tips": [
+                "Keep portions moderate until a full AI analysis is available.",
+                "Add vegetables or lean protein to improve fullness without adding many calories.",
+            ],
             "is_fallback": True,
             "fallback_reason": reason,
             "ingredients": [
@@ -346,6 +358,11 @@ class AIService:
                 "confidence": 0.6,
                 "summary": "The image has a strong fried potato and sauce signal, so calories and fat are estimated higher.",
                 "detected_tags": ["fried-food", "potato", "sauce", "energy-dense"],
+                "tips": [
+                    "Choose a smaller portion or share the fries to reduce calories.",
+                    "Use less ketchup or serve it on the side to control added sugar.",
+                    "Pair with a salad or lean protein so the meal is more filling.",
+                ],
                 "ingredients": [
                     {
                         "name": "French fries",
@@ -370,6 +387,11 @@ class AIService:
                 "confidence": 0.58,
                 "summary": "The image has a vegetable-heavy color profile, so fiber is estimated higher and calories lower than fried foods.",
                 "detected_tags": ["vegetable-heavy", "salad", "higher-fiber"],
+                "tips": [
+                    "Keep calorie-dense toppings like seeds and avocado measured rather than free-poured.",
+                    "Use a light dressing or lemon-based dressing on the side.",
+                    "Add lean protein if you need the bowl to keep you full longer.",
+                ],
                 "ingredients": [
                     {
                         "name": "Mixed vegetables with toppings",
@@ -511,11 +533,13 @@ class AIService:
             )
 
         macros = payload.get("macros") or {}
+        tips = payload.get("tips") or self._default_tips(payload.get("detected_tags", []), macros)
         return {
             "meal_name": payload.get("meal_name", "Detected meal"),
             "confidence": float(payload.get("confidence", 0.7)),
             "summary": payload.get("summary", f"Nutrition estimate for {notes or 'meal'}"),
             "detected_tags": payload.get("detected_tags", []),
+            "tips": [str(tip) for tip in tips if str(tip).strip()][:4],
             "is_fallback": False,
             "fallback_reason": None,
             "ingredients": normalized_ingredients or [
@@ -540,3 +564,22 @@ class AIService:
                 "fiber_g": float(macros.get("fiber_g", 0.0)),
             },
         }
+
+    def _default_tips(self, detected_tags: list[str], macros: dict[str, Any]) -> list[str]:
+        calories = float(macros.get("calories", 0.0))
+        fat = float(macros.get("fat_g", 0.0))
+        tags = {str(tag).lower() for tag in detected_tags}
+        if "fried-food" in tags or fat >= 25.0:
+            return [
+                "Reduce fried or oily portions and add vegetables for more volume.",
+                "Keep sauces on the side so you can control added calories.",
+            ]
+        if calories >= 650.0:
+            return [
+                "Save part of the meal for later or reduce the largest carb or fat portion.",
+                "Add water-rich vegetables to make the meal feel larger with fewer calories.",
+            ]
+        return [
+            "Keep dressings, sauces, and calorie-dense toppings measured.",
+            "Add lean protein or extra vegetables if you need the meal to be more filling.",
+        ]

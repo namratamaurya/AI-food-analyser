@@ -91,6 +91,7 @@ def test_analyze_meal_endpoint(monkeypatch) -> None:
     assert response.json()["macros"]["calories"] >= 0
     assert response.json()["is_fallback"] is True
     assert response.json()["fallback_reason"] == "Test fallback."
+    assert response.json()["tips"]
     assert response.json()["cumulative_summary"]
 
 
@@ -105,6 +106,7 @@ def test_upload_image_endpoint_accepts_frontend_form_data() -> None:
     assert response.json()["detected_tags"]
     assert response.json()["is_fallback"] is True
     assert response.json()["fallback_reason"] == "No image bytes were received by the backend."
+    assert response.json()["tips"]
     assert response.json()["cumulative_summary"]
 
 
@@ -114,6 +116,7 @@ def test_upload_image_endpoint_returns_individual_and_cumulative_analysis(monkey
             "meal_name": "Paneer bowl",
             "confidence": 0.9,
             "summary": "Paneer bowl with rice.",
+            "tips": ["Choose grilled paneer or reduce oil to lower calories."],
             "detected_tags": ["paneer", "rice"],
             "is_fallback": False,
             "fallback_reason": None,
@@ -151,12 +154,14 @@ def test_upload_image_endpoint_returns_individual_and_cumulative_analysis(monkey
     assert response.status_code == 200
     assert payload["meal_name"] == "Paneer bowl"
     assert payload["ingredients"][0]["name"] == "Paneer"
+    assert payload["tips"] == ["Choose grilled paneer or reduce oil to lower calories."]
     assert payload["is_fallback"] is False
     assert payload["cumulative_summary"]["consumed"]["calories"] >= 550.0
 
     history_response = client.get("/meal-history")
     assert history_response.status_code == 200
     assert history_response.json()[0]["ingredients"][0]["name"] == "Paneer"
+    assert history_response.json()[0]["tips"] == ["Choose grilled paneer or reduce oil to lower calories."]
 
 
 def test_upload_image_endpoint_handles_food_png_samples(monkeypatch) -> None:
@@ -168,6 +173,7 @@ def test_upload_image_endpoint_handles_food_png_samples(monkeypatch) -> None:
             "meal_name": notes or "Food sample",
             "confidence": 0.88,
             "summary": "Local food image test analysis.",
+            "tips": ["Keep sauces measured."],
             "detected_tags": ["local-test", "food-image"],
             "is_fallback": False,
             "fallback_reason": None,
@@ -208,6 +214,7 @@ def test_upload_image_endpoint_handles_food_png_samples(monkeypatch) -> None:
         payload = response.json()
         assert response.status_code == 200
         assert payload["meal_name"] == notes
+        assert payload["tips"] == ["Keep sauces measured."]
         assert payload["is_fallback"] is False
         assert payload["detected_tags"] == ["local-test", "food-image"]
 
@@ -229,6 +236,8 @@ def test_real_food_screenshots_have_different_visual_fallback_estimates() -> Non
     assert fries["macros"]["calories"] > salad["macros"]["calories"]
     assert fries["macros"]["fat_g"] > salad["macros"]["fat_g"]
     assert salad["macros"]["fiber_g"] > fries["macros"]["fiber_g"]
+    assert fries["tips"]
+    assert salad["tips"]
     assert "fried-food" in fries["detected_tags"]
     assert "vegetable-heavy" in salad["detected_tags"]
 
@@ -265,6 +274,7 @@ def test_gemini_provider_accepts_markdown_wrapped_json(monkeypatch) -> None:
   "confidence": 0.86,
   "summary": "Dal rice with vegetables.",
   "detected_tags": ["dal", "rice"],
+  "tips": ["Use less oil in the dal.", "Add extra vegetables for volume."],
   "ingredients": [
     {
       "name": "Dal",
@@ -314,6 +324,7 @@ def test_gemini_provider_accepts_markdown_wrapped_json(monkeypatch) -> None:
     analysis = service.analyze_image(b"image-bytes", "Dinner", "image/jpeg")
     assert analysis["is_fallback"] is False
     assert analysis["meal_name"] == "Dal rice"
+    assert analysis["tips"][0] == "Use less oil in the dal."
     assert analysis["macros"]["calories"] == 520.0
 
 
@@ -472,6 +483,7 @@ def test_user_profile_tracks_multiple_daily_scans_and_history(monkeypatch) -> No
             "meal_name": "French fries",
             "confidence": 0.9,
             "summary": "Fries with ketchup.",
+            "tips": ["Order a smaller portion next time."],
             "detected_tags": ["fries"],
             "is_fallback": False,
             "fallback_reason": None,
@@ -501,6 +513,7 @@ def test_user_profile_tracks_multiple_daily_scans_and_history(monkeypatch) -> No
             "meal_name": "Salad bowl",
             "confidence": 0.92,
             "summary": "Vegetable bowl with seeds.",
+            "tips": ["Keep seeds measured to manage calories."],
             "detected_tags": ["salad", "healthy"],
             "is_fallback": False,
             "fallback_reason": None,
@@ -560,6 +573,7 @@ def test_user_profile_tracks_multiple_daily_scans_and_history(monkeypatch) -> No
     assert history["meals"][0]["created_at"]
     assert history["meals"][0]["image_url"].startswith("data:image/png;base64,")
     assert history["meals"][0]["ingredients"][0]["name"]
+    assert history["meals"][0]["tips"]
 
 
 def test_user_history_defaults_to_last_three_months() -> None:
@@ -573,6 +587,7 @@ def test_user_history_defaults_to_last_three_months() -> None:
             "macros": {"calories": 300.0, "protein_g": 12.0, "carbs_g": 40.0, "fat_g": 8.0, "fiber_g": 6.0},
             "summary": "Recent.",
             "ingredients": [],
+            "tips": ["Keep portions balanced."],
             "detected_tags": [],
             "is_fallback": False,
             "fallback_reason": None,
@@ -589,6 +604,7 @@ def test_user_history_defaults_to_last_three_months() -> None:
             "macros": {"calories": 900.0, "protein_g": 20.0, "carbs_g": 100.0, "fat_g": 30.0, "fiber_g": 4.0},
             "summary": "Old.",
             "ingredients": [],
+            "tips": ["Keep portions balanced."],
             "detected_tags": [],
             "is_fallback": False,
             "fallback_reason": None,
