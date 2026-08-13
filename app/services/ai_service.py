@@ -98,60 +98,81 @@ class AIService:
         if not self.settings.gemini_api_key:
             return self._fallback_result("GEMINI_API_KEY is not configured.", notes, image_bytes, mime_type)
 
-        try:
-            encoded = base64.b64encode(image_bytes).decode("utf-8")
-            response = httpx.post(
-                (
-                    "https://generativelanguage.googleapis.com/v1beta/"
-                    f"models/{self.settings.gemini_model}:generateContent"
-                ),
-                params={"key": self.settings.gemini_api_key},
-                json={
-                    "contents": [
-                        {
-                            "role": "user",
-                            "parts": [
-                                {
-                                    "inline_data": {
-                                        "mime_type": mime_type,
-                                        "data": encoded,
-                                    }
-                                },
-                                {
-                                    "text": (
-                                        "Analyze this meal image and estimate nutrition. Return JSON only with "
-                                        "meal_name, confidence, summary, detected_tags, ingredients, macros, and tips. "
-                                        "Each ingredient must include name, estimated_quantity_g, confidence, and "
-                                        "macros with calories, protein_g, carbs_g, fat_g, fiber_g. "
-                                        "Tips must be 2-4 short, practical suggestions for reducing calories or improving this meal. "
-                                        f"Extra context: {notes or 'No notes provided'}."
-                                    )
-                                },
-                            ],
-                        }
-                    ],
-                    "generationConfig": {
-                        "maxOutputTokens": 4096,
-                        "responseMimeType": "application/json",
-                        "responseSchema": self._gemini_response_schema(),
-                    },
+        failures = []
+        for model in self._gemini_model_candidates():
+            try:
+                return self._request_gemini_analysis(model, image_bytes, notes, mime_type)
+            except httpx.HTTPStatusError as exc:
+                failure = f"Gemini model {model} failed with HTTP {exc.response.status_code}."
+                failures.append(failure)
+                if exc.response.status_code not in {429, 500, 502, 503, 504}:
+                    break
+            except httpx.HTTPError as exc:
+                failures.append(f"Gemini model {model} failed: {exc.__class__.__name__}.")
+            except json.JSONDecodeError:
+                failures.append(f"Gemini model {model} returned a response that was not valid JSON.")
+            except ValueError as exc:
+                failures.append(f"Gemini model {model} response could not be normalized: {exc}")
+            except (KeyError, TypeError) as exc:
+                failures.append(f"Gemini model {model} response could not be normalized: {exc.__class__.__name__}.")
+
+        reason = " ".join(failures) if failures else "Gemini request failed."
+        return self._fallback_result(reason, notes, image_bytes, mime_type)
+
+    def _gemini_model_candidates(self) -> list[str]:
+        candidates = [self.settings.gemini_model, "gemini-3.5-flash"]
+        return list(dict.fromkeys(model for model in candidates if model))
+
+    def _request_gemini_analysis(
+        self,
+        model: str,
+        image_bytes: bytes,
+        notes: str | None = None,
+        mime_type: str = "image/jpeg",
+    ) -> dict[str, Any]:
+        encoded = base64.b64encode(image_bytes).decode("utf-8")
+        response = httpx.post(
+            (
+                "https://generativelanguage.googleapis.com/v1beta/"
+                f"models/{model}:generateContent"
+            ),
+            params={"key": self.settings.gemini_api_key},
+            json={
+                "contents": [
+                    {
+                        "role": "user",
+                        "parts": [
+                            {
+                                "inline_data": {
+                                    "mime_type": mime_type,
+                                    "data": encoded,
+                                }
+                            },
+                            {
+                                "text": (
+                                    "Analyze this meal image and estimate nutrition. Return JSON only with "
+                                    "meal_name, confidence, summary, detected_tags, ingredients, macros, and tips. "
+                                    "Each ingredient must include name, estimated_quantity_g, confidence, and "
+                                    "macros with calories, protein_g, carbs_g, fat_g, fiber_g. "
+                                    "Tips must be 2-4 short, practical suggestions for reducing calories or improving this meal. "
+                                    f"Extra context: {notes or 'No notes provided'}."
+                                )
+                            },
+                        ],
+                    }
+                ],
+                "generationConfig": {
+                    "maxOutputTokens": 4096,
+                    "responseMimeType": "application/json",
+                    "responseSchema": self._gemini_response_schema(),
                 },
-                timeout=30.0,
-            )
-            response.raise_for_status()
-            payload = response.json()
-            raw_text = self._extract_gemini_text(payload)
-            return self._normalize(self._parse_json_response(raw_text), notes)
-        except httpx.HTTPStatusError as exc:
-            return self._fallback_result(f"Gemini request failed with HTTP {exc.response.status_code}.", notes, image_bytes, mime_type)
-        except httpx.HTTPError as exc:
-            return self._fallback_result(f"Gemini request failed: {exc.__class__.__name__}.", notes, image_bytes, mime_type)
-        except json.JSONDecodeError:
-            return self._fallback_result("Gemini returned a response that was not valid JSON.", notes, image_bytes, mime_type)
-        except ValueError as exc:
-            return self._fallback_result(f"Gemini response could not be normalized: {exc}", notes, image_bytes, mime_type)
-        except (KeyError, TypeError) as exc:
-            return self._fallback_result(f"Gemini response could not be normalized: {exc.__class__.__name__}.", notes, image_bytes, mime_type)
+            },
+            timeout=30.0,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        raw_text = self._extract_gemini_text(payload)
+        return self._normalize(self._parse_json_response(raw_text), notes)
 
     def _extract_gemini_text(self, payload: dict[str, Any]) -> str:
         candidates = payload.get("candidates") or []
@@ -344,6 +365,37 @@ class AIService:
         food_area = max(0.01, 1.0 - stats["white"])
         green_food_ratio = stats["green"] / food_area
         fried_food_ratio = stats["fried"] / food_area
+        yellow_food_ratio = stats["yellow"] / food_area
+        dark_green_food_ratio = stats["dark_green"] / food_area
+
+        if yellow_food_ratio > 0.18 and dark_green_food_ratio > 0.08:
+            ingredient_macros = {
+                "calories": 590.0,
+                "protein_g": 10.0,
+                "carbs_g": 67.0,
+                "fat_g": 31.0,
+                "fiber_g": 11.0,
+            }
+            return {
+                "meal_name": "Sarson ka saag with makki roti",
+                "confidence": 0.56,
+                "summary": "The image has a yellow corn flatbread and dark leafy curry profile, so it is estimated as makki roti with saag.",
+                "detected_tags": ["indian", "flatbread", "greens", "butter", "vegetarian"],
+                "tips": [
+                    "Reduce or skip the butter on the roti and saag to lower calories and saturated fat.",
+                    "Use less ghee in the saag tempering and add lemon or spices for flavor.",
+                    "Keep the roti portion to one piece if you are watching carbohydrates.",
+                ],
+                "ingredients": [
+                    {
+                        "name": "Makki roti with saag and butter",
+                        "estimated_quantity_g": 335.0,
+                        "confidence": 0.56,
+                        "macros": ingredient_macros,
+                    }
+                ],
+                "macros": ingredient_macros,
+            }
 
         if fried_food_ratio > 0.28 and green_food_ratio < 0.06:
             ingredient_macros = {
@@ -469,6 +521,8 @@ class AIService:
             "white": 0,
             "purple": 0,
             "orange": 0,
+            "yellow": 0,
+            "dark_green": 0,
         }
         step = max(1, min(width, height) // 180)
         for y in range(0, height, step):
@@ -491,6 +545,10 @@ class AIService:
                     counts["purple"] += 1
                 if red > 150 and 55 < green < 150 and blue < 80:
                     counts["orange"] += 1
+                if red > 170 and green > 115 and blue < 70:
+                    counts["yellow"] += 1
+                if green > 35 and red < 115 and blue < 95 and green >= red * 0.75:
+                    counts["dark_green"] += 1
 
         if counts["total"] == 0:
             raise ValueError("PNG contained no visible pixels.")

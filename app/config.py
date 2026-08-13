@@ -14,7 +14,7 @@ class Settings:
     openai_api_key: str | None = os.getenv("OPENAI_API_KEY")
     openai_model: str = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
     gemini_api_key: str | None = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-    gemini_model: str = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
+    gemini_model: str = os.getenv("GEMINI_MODEL", "gemini-3.5-flash")
     mongo_uri: str | None = os.getenv("MONGODB_URI")
     mongo_db: str = os.getenv("MONGODB_DB", "nutrition_app")
     cors_origins: tuple[str, ...] = tuple(

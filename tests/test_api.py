@@ -5,6 +5,7 @@ import zlib
 from pathlib import Path
 
 import pytest
+import httpx
 from fastapi.testclient import TestClient
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -19,6 +20,7 @@ REAL_FOOD_SCREENSHOTS = [
     Path("/Users/namratamaurya/Desktop/Screenshot 2026-08-12 at 7.45.31 PM.png"),
     Path("/Users/namratamaurya/Desktop/Screenshot 2026-08-12 at 7.46.26 PM.png"),
 ]
+MAKKI_SAAG_SCREENSHOT = Path("/Users/namratamaurya/Desktop/Screenshot 2026-08-13 at 12.27.34 PM.png")
 
 
 def _food_png_bytes(theme: str = "dal_rice", width: int = 96, height: int = 72) -> bytes:
@@ -242,6 +244,20 @@ def test_real_food_screenshots_have_different_visual_fallback_estimates() -> Non
     assert "vegetable-heavy" in salad["detected_tags"]
 
 
+def test_makki_saag_screenshot_visual_fallback_is_not_fries() -> None:
+    if not MAKKI_SAAG_SCREENSHOT.exists():
+        pytest.skip("Makki saag screenshot is only available on the local development machine.")
+
+    service = AIService(Settings(openai_api_key=None, gemini_api_key=None))
+    analysis = service.analyze_image(MAKKI_SAAG_SCREENSHOT.read_bytes(), "Makki saag screenshot", "image/png")
+
+    assert analysis["meal_name"] == "Sarson ka saag with makki roti"
+    assert "flatbread" in analysis["detected_tags"]
+    assert "fried-food" not in analysis["detected_tags"]
+    assert analysis["macros"]["fiber_g"] >= 10.0
+    assert analysis["tips"]
+
+
 def test_gemini_provider_requires_gemini_key() -> None:
     service = AIService(
         Settings(
@@ -326,6 +342,71 @@ def test_gemini_provider_accepts_markdown_wrapped_json(monkeypatch) -> None:
     assert analysis["meal_name"] == "Dal rice"
     assert analysis["tips"][0] == "Use less oil in the dal."
     assert analysis["macros"]["calories"] == 520.0
+
+
+def test_gemini_provider_retries_with_stable_flash_model(monkeypatch) -> None:
+    calls = []
+
+    class UnavailableGeminiResponse:
+        def raise_for_status(self) -> None:
+            request = httpx.Request("POST", "https://generativelanguage.googleapis.com")
+            response = httpx.Response(503, request=request)
+            raise httpx.HTTPStatusError("unavailable", request=request, response=response)
+
+    class SuccessfulGeminiResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict:
+            return {
+                "candidates": [
+                    {
+                        "content": {
+                            "parts": [
+                                {
+                                    "text": """{
+  "meal_name": "Sarson ka Saag with Makki di Roti",
+  "confidence": 0.95,
+  "summary": "Mustard greens curry with corn flatbread.",
+  "detected_tags": ["indian", "flatbread", "greens"],
+  "tips": ["Reduce butter to lower calories."],
+  "ingredients": [],
+  "macros": {
+    "calories": 591,
+    "protein_g": 10.2,
+    "carbs_g": 66.6,
+    "fat_g": 31,
+    "fiber_g": 11.3
+  }
+}"""
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+
+    def fake_post(url, *args, **kwargs):
+        calls.append(url)
+        if "gemini-3.6-flash" in url:
+            return UnavailableGeminiResponse()
+        return SuccessfulGeminiResponse()
+
+    monkeypatch.setattr("app.services.ai_service.httpx.post", fake_post)
+    service = AIService(
+        Settings(
+            ai_provider="gemini",
+            openai_api_key=None,
+            gemini_api_key="test-key",
+            gemini_model="gemini-3.6-flash",
+        )
+    )
+
+    analysis = service.analyze_image(b"image-bytes", "Meal photo analysis", "image/png")
+    assert analysis["is_fallback"] is False
+    assert analysis["meal_name"] == "Sarson ka Saag with Makki di Roti"
+    assert any("gemini-3.6-flash" in call for call in calls)
+    assert any("gemini-3.5-flash" in call for call in calls)
 
 
 def test_gemini_provider_accepts_json_from_later_response_part(monkeypatch) -> None:
