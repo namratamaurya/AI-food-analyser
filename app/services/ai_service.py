@@ -123,6 +123,17 @@ class AIService:
         candidates = [self.settings.gemini_model, "gemini-3.5-flash"]
         return list(dict.fromkeys(model for model in candidates if model))
 
+    def _prepare_image_for_ai(self, image_bytes: bytes, mime_type: str) -> dict[str, Any]:
+        if mime_type != "image/png" or len(image_bytes) <= 900_000:
+            return {"bytes": image_bytes, "mime_type": mime_type}
+
+        try:
+            png = self._decode_png(image_bytes)
+            resized = self._resize_png(png, max_dimension=768)
+            return {"bytes": resized, "mime_type": "image/png"}
+        except (KeyError, TypeError, ValueError, zlib.error, struct.error):
+            return {"bytes": image_bytes, "mime_type": mime_type}
+
     def _request_gemini_analysis(
         self,
         model: str,
@@ -130,7 +141,8 @@ class AIService:
         notes: str | None = None,
         mime_type: str = "image/jpeg",
     ) -> dict[str, Any]:
-        encoded = base64.b64encode(image_bytes).decode("utf-8")
+        prepared = self._prepare_image_for_ai(image_bytes, mime_type)
+        encoded = base64.b64encode(prepared["bytes"]).decode("utf-8")
         response = httpx.post(
             (
                 "https://generativelanguage.googleapis.com/v1beta/"
@@ -144,7 +156,7 @@ class AIService:
                         "parts": [
                             {
                                 "inline_data": {
-                                    "mime_type": mime_type,
+                                    "mime_type": prepared["mime_type"],
                                     "data": encoded,
                                 }
                             },
@@ -458,6 +470,59 @@ class AIService:
         return None
 
     def _png_color_stats(self, image_bytes: bytes) -> dict[str, float]:
+        png = self._decode_png(image_bytes)
+        width = png["width"]
+        height = png["height"]
+        channels = png["channels"]
+        rows = png["rows"]
+
+        counts = {
+            "total": 0,
+            "green": 0,
+            "fried": 0,
+            "red": 0,
+            "white": 0,
+            "purple": 0,
+            "orange": 0,
+            "yellow": 0,
+            "dark_green": 0,
+        }
+        step = max(1, min(width, height) // 180)
+        for y in range(0, height, step):
+            row = rows[y]
+            for x in range(0, width, step):
+                index = x * channels
+                red, green, blue = row[index], row[index + 1], row[index + 2]
+                if channels == 4 and row[index + 3] < 20:
+                    continue
+                counts["total"] += 1
+                if green > 70 and green > red * 1.08 and green > blue * 1.08:
+                    counts["green"] += 1
+                if red > 120 and green > 75 and blue < 125 and red >= green * 0.85:
+                    counts["fried"] += 1
+                if red > 120 and green < 90 and blue < 90:
+                    counts["red"] += 1
+                if red > 215 and green > 205 and blue > 185:
+                    counts["white"] += 1
+                if red > 70 and blue > 70 and red > green * 1.15 and blue > green * 1.05:
+                    counts["purple"] += 1
+                if red > 150 and 55 < green < 150 and blue < 80:
+                    counts["orange"] += 1
+                if red > 170 and green > 115 and blue < 70:
+                    counts["yellow"] += 1
+                if green > 35 and red < 115 and blue < 95 and green >= red * 0.75:
+                    counts["dark_green"] += 1
+
+        if counts["total"] == 0:
+            raise ValueError("PNG contained no visible pixels.")
+
+        return {
+            key: value / counts["total"]
+            for key, value in counts.items()
+            if key != "total"
+        }
+
+    def _decode_png(self, image_bytes: bytes) -> dict[str, Any]:
         if not image_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
             raise ValueError("Image is not a PNG.")
 
@@ -513,51 +578,51 @@ class AIService:
             rows.append(row)
             previous = row
 
-        counts = {
-            "total": 0,
-            "green": 0,
-            "fried": 0,
-            "red": 0,
-            "white": 0,
-            "purple": 0,
-            "orange": 0,
-            "yellow": 0,
-            "dark_green": 0,
-        }
-        step = max(1, min(width, height) // 180)
-        for y in range(0, height, step):
-            row = rows[y]
-            for x in range(0, width, step):
-                index = x * channels
-                red, green, blue = row[index], row[index + 1], row[index + 2]
-                if channels == 4 and row[index + 3] < 20:
-                    continue
-                counts["total"] += 1
-                if green > 70 and green > red * 1.08 and green > blue * 1.08:
-                    counts["green"] += 1
-                if red > 120 and green > 75 and blue < 125 and red >= green * 0.85:
-                    counts["fried"] += 1
-                if red > 120 and green < 90 and blue < 90:
-                    counts["red"] += 1
-                if red > 215 and green > 205 and blue > 185:
-                    counts["white"] += 1
-                if red > 70 and blue > 70 and red > green * 1.15 and blue > green * 1.05:
-                    counts["purple"] += 1
-                if red > 150 and 55 < green < 150 and blue < 80:
-                    counts["orange"] += 1
-                if red > 170 and green > 115 and blue < 70:
-                    counts["yellow"] += 1
-                if green > 35 and red < 115 and blue < 95 and green >= red * 0.75:
-                    counts["dark_green"] += 1
+        return {"width": width, "height": height, "channels": channels, "rows": rows}
 
-        if counts["total"] == 0:
-            raise ValueError("PNG contained no visible pixels.")
+    def _resize_png(self, png: dict[str, Any], max_dimension: int) -> bytes:
+        width = int(png["width"])
+        height = int(png["height"])
+        channels = int(png["channels"])
+        rows = png["rows"]
+        largest = max(width, height)
+        if largest <= max_dimension:
+            return self._encode_png(width, height, channels, rows)
 
-        return {
-            key: value / counts["total"]
-            for key, value in counts.items()
-            if key != "total"
-        }
+        scale = max_dimension / largest
+        new_width = max(1, int(width * scale))
+        new_height = max(1, int(height * scale))
+        resized_rows = []
+        for y in range(new_height):
+            source_y = min(height - 1, int(y / scale))
+            source_row = rows[source_y]
+            row = bytearray()
+            for x in range(new_width):
+                source_x = min(width - 1, int(x / scale))
+                start = source_x * channels
+                row.extend(source_row[start : start + channels])
+            resized_rows.append(row)
+
+        return self._encode_png(new_width, new_height, channels, resized_rows)
+
+    def _encode_png(self, width: int, height: int, channels: int, rows: list[bytearray]) -> bytes:
+        color_type = 6 if channels == 4 else 2
+        header = struct.pack(">IIBBBBB", width, height, 8, color_type, 0, 0, 0)
+        raw = bytearray()
+        for row in rows:
+            raw.append(0)
+            raw.extend(row)
+
+        def chunk(kind: bytes, data: bytes) -> bytes:
+            checksum = zlib.crc32(kind + data) & 0xFFFFFFFF
+            return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", checksum)
+
+        return (
+            b"\x89PNG\r\n\x1a\n"
+            + chunk(b"IHDR", header)
+            + chunk(b"IDAT", zlib.compress(bytes(raw), level=6))
+            + chunk(b"IEND", b"")
+        )
 
     def _paeth_predictor(self, left: int, up: int, upper_left: int) -> int:
         estimate = left + up - upper_left

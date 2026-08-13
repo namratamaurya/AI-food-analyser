@@ -1,4 +1,5 @@
 import sys
+import base64
 import struct
 from datetime import datetime, timedelta, timezone
 import zlib
@@ -407,6 +408,69 @@ def test_gemini_provider_retries_with_stable_flash_model(monkeypatch) -> None:
     assert analysis["meal_name"] == "Sarson ka Saag with Makki di Roti"
     assert any("gemini-3.6-flash" in call for call in calls)
     assert any("gemini-3.5-flash" in call for call in calls)
+
+
+def test_large_png_is_downscaled_before_gemini_request(monkeypatch) -> None:
+    if not MAKKI_SAAG_SCREENSHOT.exists():
+        pytest.skip("Makki saag screenshot is only available on the local development machine.")
+
+    request_payloads = []
+
+    class SuccessfulGeminiResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict:
+            return {
+                "candidates": [
+                    {
+                        "content": {
+                            "parts": [
+                                {
+                                    "text": """{
+  "meal_name": "Makki ki Roti with Sarson ka Saag",
+  "confidence": 0.95,
+  "summary": "Corn flatbread with mustard greens.",
+  "detected_tags": ["indian", "greens"],
+  "tips": ["Reduce butter to lower calories."],
+  "ingredients": [],
+  "macros": {
+    "calories": 560,
+    "protein_g": 10.9,
+    "carbs_g": 66.1,
+    "fat_g": 27,
+    "fiber_g": 12.5
+  }
+}"""
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+
+    def fake_post(*args, **kwargs):
+        request_payloads.append(kwargs["json"])
+        return SuccessfulGeminiResponse()
+
+    original = MAKKI_SAAG_SCREENSHOT.read_bytes()
+    monkeypatch.setattr("app.services.ai_service.httpx.post", fake_post)
+    service = AIService(
+        Settings(
+            ai_provider="gemini",
+            openai_api_key=None,
+            gemini_api_key="test-key",
+            gemini_model="gemini-3.5-flash",
+        )
+    )
+
+    analysis = service.analyze_image(original, "Meal photo analysis", "image/png")
+    sent_image = request_payloads[0]["contents"][0]["parts"][0]["inline_data"]
+
+    assert analysis["is_fallback"] is False
+    assert analysis["meal_name"] == "Makki ki Roti with Sarson ka Saag"
+    assert sent_image["mime_type"] == "image/png"
+    assert len(sent_image["data"]) < len(base64.b64encode(original).decode("utf-8")) * 0.5
 
 
 def test_gemini_provider_accepts_json_from_later_response_part(monkeypatch) -> None:
