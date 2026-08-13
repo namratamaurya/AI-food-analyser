@@ -13,7 +13,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import app.api as api_module
 from app.config import Settings
+from app.models import DailyGoals
 from app.services.ai_service import AIService
+from app.services.storage_service import MongoStorage, StorageUnavailableError
 from main import app
 
 client = TestClient(app)
@@ -65,6 +67,8 @@ def test_health_endpoint() -> None:
     assert response.status_code == 200
     assert response.json()["status"] == "ok"
     assert response.json()["ai_provider"]
+    assert "storage_backend" in response.json()
+    assert "storage_available" in response.json()
 
 
 def test_cors_preflight_allows_frontend_origin() -> None:
@@ -619,6 +623,23 @@ def test_goals_and_daily_summary() -> None:
     summary_response = client.get("/daily-summary")
     assert summary_response.status_code == 200
     assert summary_response.json()["goals"]["calories"] == 2200
+
+
+def test_configured_mongo_failure_does_not_silently_use_memory() -> None:
+    storage = MongoStorage(
+        Settings(
+            mongo_uri="mongodb://127.0.0.1:1",
+            mongo_timeout_ms=1,
+        )
+    )
+
+    with pytest.raises(StorageUnavailableError):
+        storage.set_goals(DailyGoals(calories=1800), "mongo-failure-user")
+
+    status = storage.get_status()
+    assert status["backend"] == "mongodb"
+    assert status["configured"] is True
+    assert status["available"] is False
 
 
 def test_user_profile_tracks_multiple_daily_scans_and_history(monkeypatch) -> None:

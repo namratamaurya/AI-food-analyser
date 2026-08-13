@@ -1,6 +1,6 @@
 import base64
 
-from fastapi import FastAPI, File, UploadFile
+from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import get_settings
@@ -20,7 +20,7 @@ from app.models import (
     StreakSummary,
 )
 from app.services.ai_service import AIService
-from app.services.storage_service import create_storage
+from app.services.storage_service import StorageUnavailableError, create_storage
 
 settings = get_settings()
 app = FastAPI(title=settings.app_name, version=settings.app_version)
@@ -48,15 +48,19 @@ def health_check() -> dict[str, str]:
         if settings.ai_provider == "gemini"
         else bool(settings.openai_api_key)
     )
+    storage_status = storage.get_status()
     return {
         "status": "ok",
         "ai_provider": settings.ai_provider,
         "ai_configured": "true" if ai_configured else "false",
+        "storage_backend": storage_status["backend"],
+        "storage_configured": "true" if storage_status["configured"] else "false",
+        "storage_available": "true" if storage_status["available"] else "false",
     }
 
 
 def _daily_summary_response(user_id: str | None = None) -> DailySummary:
-    summary = storage.get_daily_summary(user_id or "default")
+    summary = _storage_call(storage.get_daily_summary, user_id or "default")
     return DailySummary(
         goals=summary["goals"],
         consumed=summary["consumed"],
@@ -92,7 +96,8 @@ def _store_analysis(
     image_url: str | None = None,
     image_mime_type: str | None = None,
 ) -> None:
-    storage.add_meal(
+    _storage_call(
+        storage.add_meal,
         {
             "meal_name": response.meal_name,
             "confidence": response.confidence,
@@ -110,13 +115,20 @@ def _store_analysis(
     )
 
 
+def _storage_call(operation, *args, **kwargs):
+    try:
+        return operation(*args, **kwargs)
+    except StorageUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
 def _image_data_url(image_bytes: bytes, mime_type: str) -> str:
     encoded = base64.b64encode(image_bytes).decode("utf-8")
     return f"data:{mime_type};base64,{encoded}"
 
 
 def _history_response(user_id: str, months: int = 3) -> UserHistoryResponse:
-    meals = storage.get_meal_history(user_id=user_id, months=months)
+    meals = _storage_call(storage.get_meal_history, user_id=user_id, months=months)
     total = MacroBreakdown()
     for meal in meals:
         macros = meal.get("macros", {})
@@ -226,7 +238,7 @@ def check_accuracy(payload: AccuracyCheckRequest) -> AccuracyCheckResponse:
 
 @app.post("/goals", response_model=DailyGoals)
 def set_goals(payload: DailyGoals, user_id: str | None = None) -> DailyGoals:
-    return storage.set_goals(payload, user_id or "default")
+    return _storage_call(storage.set_goals, payload, user_id or "default")
 
 
 @app.get("/daily-summary", response_model=DailySummary)
@@ -236,7 +248,7 @@ def daily_summary(user_id: str | None = None) -> DailySummary:
 
 @app.get("/users/{user_id}/profile", response_model=UserProfileResponse)
 def user_profile(user_id: str) -> UserProfileResponse:
-    profile = storage.get_user_profile(user_id)
+    profile = _storage_call(storage.get_user_profile, user_id)
     return UserProfileResponse(
         user_id=profile["user_id"],
         goals=profile["goals"],
@@ -249,7 +261,7 @@ def user_profile(user_id: str) -> UserProfileResponse:
 
 @app.post("/users/{user_id}/goals", response_model=DailyGoals)
 def set_user_goals(user_id: str, payload: DailyGoals) -> DailyGoals:
-    return storage.set_goals(payload, user_id)
+    return _storage_call(storage.set_goals, payload, user_id)
 
 
 @app.get("/users/{user_id}/daily-summary", response_model=DailySummary)
@@ -259,7 +271,7 @@ def user_daily_summary(user_id: str) -> DailySummary:
 
 @app.get("/users/{user_id}/weekly-summary", response_model=PeriodSummary)
 def user_weekly_summary(user_id: str) -> PeriodSummary:
-    return PeriodSummary(**storage.get_weekly_summary(user_id))
+    return PeriodSummary(**_storage_call(storage.get_weekly_summary, user_id))
 
 
 @app.get("/users/{user_id}/history", response_model=UserHistoryResponse)
@@ -269,4 +281,4 @@ def user_history(user_id: str, months: int = 3) -> UserHistoryResponse:
 
 @app.get("/meal-history")
 def meal_history(user_id: str | None = None, months: int | None = None) -> list[dict]:
-    return storage.get_meal_history(user_id=user_id, months=months)
+    return _storage_call(storage.get_meal_history, user_id=user_id, months=months)

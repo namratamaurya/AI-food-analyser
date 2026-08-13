@@ -50,7 +50,7 @@ Environment variables can be set in a `.env` file or exported in your shell. See
 ## API overview
 
 - GET /: health check message
-- GET /health: service health and AI configuration status
+- GET /health: service health, AI configuration, and storage status
 - POST /analyze-meal: analyze a meal from an image URL and notes
 - POST /upload-image: upload an image file for direct analysis, with optional `user_id`; responses include ingredients and calorie-reduction tips
 - POST /goals: set daily nutrition goals
@@ -65,7 +65,9 @@ Environment variables can be set in a `.env` file or exported in your shell. See
 ## Notes
 
 - If no OpenAI API key is configured, the service uses a deterministic fallback response so development can continue.
-- The current implementation uses in-memory storage; MongoDB can be added later via a repository pattern.
+- Set `MONGODB_URI` or `MONGO_URI` in production so scans, goals, streaks, and history persist across refreshes and server restarts.
+- If MongoDB is configured but unavailable, write/read endpoints return `503` instead of silently saving to temporary memory.
+- Check `/health` after deployment. `storage_backend` should be `mongodb` and `storage_available` should be `true`.
 
 ## Pre-deploy AI image smoke test
 

@@ -11,6 +11,10 @@ from app.models import DailyGoals, MacroBreakdown
 DEFAULT_USER_ID = "default"
 
 
+class StorageUnavailableError(RuntimeError):
+    pass
+
+
 class StorageRepository(ABC):
     @abstractmethod
     def set_goals(self, goals: DailyGoals, user_id: str = DEFAULT_USER_ID) -> DailyGoals:
@@ -34,6 +38,10 @@ class StorageRepository(ABC):
 
     @abstractmethod
     def get_user_profile(self, user_id: str = DEFAULT_USER_ID) -> dict:
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_status(self) -> dict:
         raise NotImplementedError
 
 
@@ -115,6 +123,14 @@ class InMemoryStorage(StorageRepository):
             "total_scans": len(history),
         }
 
+    def get_status(self) -> dict:
+        return {
+            "backend": "memory",
+            "configured": False,
+            "available": True,
+            "detail": "Using in-memory storage. Data will not persist across server restarts.",
+        }
+
 
 class MongoStorage(StorageRepository):
     def __init__(self, settings: Settings) -> None:
@@ -125,6 +141,7 @@ class MongoStorage(StorageRepository):
         self._goals_collection = None
         self._meals_collection = None
         self._available = False
+        self._last_error: str | None = None
 
     def _ensure_connection(self) -> bool:
         if self._available:
@@ -133,26 +150,38 @@ class MongoStorage(StorageRepository):
             return False
 
         try:
-            self._client = MongoClient(self.settings.mongo_uri, serverSelectionTimeoutMS=1500)
+            self._client = MongoClient(self.settings.mongo_uri, serverSelectionTimeoutMS=self.settings.mongo_timeout_ms)
             self._db = self._client[self.settings.mongo_db]
             self._goals_collection = self._db["daily_goals"]
             self._meals_collection = self._db["meal_history"]
             self._db.command("ping")
             self._available = True
+            self._last_error = None
             return True
-        except (PyMongoError, TimeoutError):
+        except (PyMongoError, TimeoutError) as exc:
             self._available = False
+            self._last_error = f"{exc.__class__.__name__}: {exc}"
             return False
 
-    def set_goals(self, goals: DailyGoals, user_id: str = DEFAULT_USER_ID) -> DailyGoals:
+    def _require_connection(self) -> bool:
         if self._ensure_connection():
+            return True
+        if self.settings.mongo_uri:
+            raise StorageUnavailableError(
+                "MongoDB is configured but unavailable. "
+                f"Last error: {self._last_error or 'connection failed'}"
+            )
+        return False
+
+    def set_goals(self, goals: DailyGoals, user_id: str = DEFAULT_USER_ID) -> DailyGoals:
+        if self._require_connection():
             payload = {"_id": user_id, "user_id": user_id, **goals.model_dump()}
             self._goals_collection.replace_one({"_id": user_id}, payload, upsert=True)
             return goals
         return self._fallback.set_goals(goals, user_id)
 
     def add_meal(self, meal: dict) -> dict:
-        if self._ensure_connection():
+        if self._require_connection():
             document = {
                 **meal,
                 "user_id": meal.get("user_id") or DEFAULT_USER_ID,
@@ -163,7 +192,7 @@ class MongoStorage(StorageRepository):
         return self._fallback.add_meal(meal)
 
     def get_daily_summary(self, user_id: str = DEFAULT_USER_ID) -> dict:
-        if self._ensure_connection():
+        if self._require_connection():
             today = datetime.now(timezone.utc).date()
             goal_doc = self._goals_collection.find_one({"_id": user_id})
             goals = DailyGoals(**{k: v for k, v in goal_doc.items() if k != "_id"}) if goal_doc else DailyGoals()
@@ -184,7 +213,7 @@ class MongoStorage(StorageRepository):
         return self._fallback.get_daily_summary(user_id)
 
     def get_meal_history(self, user_id: str | None = None, months: int | None = None) -> list[dict]:
-        if self._ensure_connection():
+        if self._require_connection():
             query = {}
             if user_id is not None:
                 query["user_id"] = user_id
@@ -194,7 +223,7 @@ class MongoStorage(StorageRepository):
         return self._fallback.get_meal_history(user_id, months)
 
     def get_weekly_summary(self, user_id: str = DEFAULT_USER_ID) -> dict:
-        if self._ensure_connection():
+        if self._require_connection():
             end = datetime.now(timezone.utc)
             start = end - timedelta(days=6)
             meals = list(
@@ -214,7 +243,7 @@ class MongoStorage(StorageRepository):
         return self._fallback.get_weekly_summary(user_id)
 
     def get_user_profile(self, user_id: str = DEFAULT_USER_ID) -> dict:
-        if self._ensure_connection():
+        if self._require_connection():
             history = self.get_meal_history(user_id=user_id)
             daily = self.get_daily_summary(user_id)
             goal_doc = self._goals_collection.find_one({"_id": user_id})
@@ -228,6 +257,18 @@ class MongoStorage(StorageRepository):
                 "total_scans": len(history),
             }
         return self._fallback.get_user_profile(user_id)
+
+    def get_status(self) -> dict:
+        available = self._ensure_connection()
+        if self.settings.mongo_uri:
+            return {
+                "backend": "mongodb",
+                "configured": True,
+                "available": available,
+                "database": self.settings.mongo_db,
+                "detail": "MongoDB connection is available." if available else self._last_error,
+            }
+        return self._fallback.get_status()
 
     def _serialize_document(self, document: dict) -> dict:
         serialized = {}
