@@ -68,6 +68,15 @@ def _daily_summary_response(user_id: str | None = None) -> DailySummary:
     )
 
 
+def _optional_daily_summary_response(user_id: str | None = None) -> DailySummary | None:
+    try:
+        return _daily_summary_response(user_id)
+    except HTTPException as exc:
+        if exc.status_code == 503:
+            return None
+        raise
+
+
 def _build_analysis_response(analysis: dict) -> MealAnalysisResponse:
     return MealAnalysisResponse(
         meal_name=analysis["meal_name"],
@@ -113,6 +122,20 @@ def _store_analysis(
             "image_mime_type": image_mime_type,
         }
     )
+
+
+def _optional_store_analysis(
+    response: MealAnalysisResponse,
+    user_id: str | None = None,
+    image_url: str | None = None,
+    image_mime_type: str | None = None,
+) -> None:
+    try:
+        _store_analysis(response, user_id, image_url, image_mime_type)
+    except HTTPException as exc:
+        if exc.status_code == 503:
+            return
+        raise
 
 
 def _storage_call(operation, *args, **kwargs):
@@ -172,8 +195,8 @@ async def analyze_meal(payload: MealAnalysisRequest) -> MealAnalysisResponse:
         analysis = ai_service.analyze_image_url(payload.image_url, payload.notes)
 
     response = _build_analysis_response(analysis)
-    _store_analysis(response, payload.user_id, payload.image_url, "image/url" if payload.image_url else None)
-    response.cumulative_summary = _daily_summary_response(payload.user_id)
+    _optional_store_analysis(response, payload.user_id, payload.image_url, "image/url" if payload.image_url else None)
+    response.cumulative_summary = _optional_daily_summary_response(payload.user_id)
     return response
 
 
@@ -188,8 +211,8 @@ async def upload_image(
     analysis = ai_service.analyze_image(image_bytes, notes, mime_type)
     response = _build_analysis_response(analysis)
     image_url = _image_data_url(image_bytes, mime_type) if image_bytes else None
-    _store_analysis(response, user_id, image_url, mime_type)
-    response.cumulative_summary = _daily_summary_response(user_id)
+    _optional_store_analysis(response, user_id, image_url, mime_type)
+    response.cumulative_summary = _optional_daily_summary_response(user_id)
     return response
 
 

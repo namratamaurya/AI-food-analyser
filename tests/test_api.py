@@ -171,6 +171,46 @@ def test_upload_image_endpoint_returns_individual_and_cumulative_analysis(monkey
     assert history_response.json()[0]["tips"] == ["Choose grilled paneer or reduce oil to lower calories."]
 
 
+def test_upload_image_returns_analysis_when_storage_is_unavailable(monkeypatch) -> None:
+    def fake_analyze_image(image_bytes: bytes, notes: str | None = None, mime_type: str = "image/jpeg") -> dict:
+        return {
+            "meal_name": "Storage resilient meal",
+            "confidence": 0.84,
+            "summary": "Analysis should be returned even if persistence is down.",
+            "tips": ["Keep the portion balanced."],
+            "detected_tags": ["storage-resilient"],
+            "is_fallback": False,
+            "fallback_reason": None,
+            "ingredients": [],
+            "macros": {
+                "calories": 360.0,
+                "protein_g": 18.0,
+                "carbs_g": 44.0,
+                "fat_g": 12.0,
+                "fiber_g": 6.0,
+            },
+        }
+
+    def unavailable_storage(*args, **kwargs):
+        raise StorageUnavailableError("MongoDB is configured but unavailable.")
+
+    monkeypatch.setattr(api_module.ai_service, "analyze_image", fake_analyze_image)
+    monkeypatch.setattr(api_module.storage, "add_meal", unavailable_storage)
+    monkeypatch.setattr(api_module.storage, "get_daily_summary", unavailable_storage)
+
+    response = client.post(
+        "/upload-image",
+        params={"notes": "Storage outage"},
+        files={"file": ("meal.jpg", b"image-bytes", "image/jpeg")},
+    )
+    payload = response.json()
+
+    assert response.status_code == 200
+    assert payload["meal_name"] == "Storage resilient meal"
+    assert payload["macros"]["calories"] == 360.0
+    assert payload["cumulative_summary"] is None
+
+
 def test_upload_image_endpoint_handles_food_png_samples(monkeypatch) -> None:
     seen_uploads = []
 

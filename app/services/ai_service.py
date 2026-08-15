@@ -120,7 +120,12 @@ class AIService:
         return self._fallback_result(reason, notes, image_bytes, mime_type)
 
     def _gemini_model_candidates(self) -> list[str]:
-        candidates = [self.settings.gemini_model, "gemini-3.5-flash"]
+        candidates = [
+            self.settings.gemini_model,
+            "gemini-3.6-flash",
+            "gemini-3.5-flash",
+            "gemini-2.5-flash",
+        ]
         return list(dict.fromkeys(model for model in candidates if model))
 
     def _prepare_image_for_ai(self, image_bytes: bytes, mime_type: str) -> dict[str, Any]:
