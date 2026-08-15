@@ -15,6 +15,7 @@ class Settings:
     openai_model: str = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
     gemini_api_key: str | None = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
     gemini_model: str = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
+    postgres_url: str | None = os.getenv("POSTGRES_URL") or os.getenv("DATABASE_URL")
     mongo_uri: str | None = os.getenv("MONGODB_URI") or os.getenv("MONGO_URI") or os.getenv("MONGODB_URL")
     mongo_db: str = os.getenv("MONGODB_DB", "nutrition_app")
     mongo_timeout_ms: int = int(os.getenv("MONGODB_TIMEOUT_MS", "5000"))

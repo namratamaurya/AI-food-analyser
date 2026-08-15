@@ -15,7 +15,7 @@ import app.api as api_module
 from app.config import Settings
 from app.models import DailyGoals
 from app.services.ai_service import AIService
-from app.services.storage_service import MongoStorage, StorageUnavailableError
+from app.services.storage_service import MongoStorage, PostgresStorage, StorageUnavailableError, create_storage
 from main import app
 
 client = TestClient(app)
@@ -69,6 +69,29 @@ def test_health_endpoint() -> None:
     assert response.json()["ai_provider"]
     assert "storage_backend" in response.json()
     assert "storage_available" in response.json()
+
+
+def test_create_storage_prefers_neon_postgres_url() -> None:
+    storage = create_storage(Settings(postgres_url="postgres://example"))
+
+    assert isinstance(storage, PostgresStorage)
+
+
+def test_postgres_status_reports_unavailable_connection() -> None:
+    def failing_connection_factory(url: str):
+        raise RuntimeError(f"Could not connect to {url}")
+
+    storage = PostgresStorage(
+        Settings(postgres_url="postgres://example"),
+        connection_factory=failing_connection_factory,
+    )
+
+    status = storage.get_status()
+
+    assert status["backend"] == "postgres"
+    assert status["configured"] is True
+    assert status["available"] is False
+    assert "RuntimeError" in status["detail"]
 
 
 def test_cors_preflight_allows_frontend_origin() -> None:
